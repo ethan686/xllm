@@ -23,7 +23,7 @@ limitations under the License.
 
 #include "torch_npu/csrc/core/npu/NPUCachingAllocator.h"
 #include "torch_npu/csrc/core/npu/NPUException.h"
-#include "xllm_kernels/models/mistral/mistral_decoder.h"
+#include "xllm_atb_layers/models/mistral/layer/mistral_decoder.h"
 
 namespace xllm {
 namespace layer {
