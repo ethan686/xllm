@@ -39,7 +39,8 @@ limitations under the License.
 #include "nlohmann/json.hpp"
 #include "npu_base_layer.h"
 #include "pytorch/adapter/utils/utils.h"
-#include "xllm_kernels/models/mistral/mistral_decoder.h"
+#include "xllm_atb_layers/models/mistral/mistral_decoder.h"
+#include "core/layers/mistral_decoder_layer.h"
 
 namespace xllm {
 namespace layer {
