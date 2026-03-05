@@ -22,14 +22,13 @@
 #include <unordered_map>
 #include <vector>
 
-#include "core/framework/dit_model_loader.h"
 #include "core/framework/kv_cache/kv_cache.h"
 #include "core/framework/model/model_input_params.h"
 #include "core/framework/model_context.h"
+#include "llm_model_base.h"
 #include "models/model_registry.h"
 #include "xllm/core/layers/common/add_matmul.h"
 #include "xllm/core/layers/common/attention_mask.h"
-#include "xllm_kernels/core/include/atb_speed/log.h"
 
 namespace xllm {
 
@@ -126,9 +125,10 @@ TORCH_MODULE(MistralRotaryEmbedding);
  * 
  * This is a thin wrapper around NPU-optimized decoder layer implementation.
  */
-class MistralDecoderLayerImpl : public torch::nn::Module {
+class MistralDecoderLayerImpl : public LlmDecoderLayerImplBase<layer::NpuMistralDecoderLayer> {
  public:
-  explicit MistralDecoderLayerImpl(const ModelContext& context, int64_t layer_idx) {
+  MistralDecoderLayerImpl(const ModelContext& context, const int32_t layer_id)
+      : LlmDecoderLayerImplBase<layer::NpuMistralDecoderLayer>(context, layer_id) {
     decoder_layer_ = register_module(
         "decoder_layer", 
         layer::NpuMistralDecoderLayer(context));
@@ -182,7 +182,7 @@ TORCH_MODULE(MistralDecoderLayer);
  * - Final layer normalization
  * - Rotary position embeddings
  */
-class MistralModelImpl : public torch::nn::Module {
+class MistralModelImpl : public LlmModelImplBase<MistralDecoderLayer> {
  public:
   struct Output {
     torch::Tensor last_hidden_state;
@@ -191,7 +191,8 @@ class MistralModelImpl : public torch::nn::Module {
     std::vector<torch::Tensor> attentions;
   };
 
-  explicit MistralModelImpl(const ModelContext& context) {
+  explicit MistralModelImpl(const ModelContext& context)
+      : LlmModelImplBase<MistralDecoderLayer>("mistral", context.get_model_args()) {
     auto model_args = context.get_model_args();
     auto options = context.get_tensor_options();
     
@@ -214,13 +215,13 @@ class MistralModelImpl : public torch::nn::Module {
     }
     
     // 2. Decoder layers
-    decoder_layers_ = register_module("layers", torch::nn::ModuleList());
-    decoder_layers_->reserve(model_args.mm_num_hidden_layers());
+    blocks_ = register_module("layers", torch::nn::ModuleList());
+    layers_.reserve(model_args.mm_num_hidden_layers());
     
-    for (int32_t idx = 0; idx < model_args.mm_num_hidden_layers(); ++idx) {
-      auto layer = MistralDecoderLayer(context, idx);
-      decoder_layers_->push_back(layer);
+    for (int32_t i = 0; i < model_args.mm_num_hidden_layers(); ++i) {
+      auto layer = MistralDecoderLayer(context, i);
       layers_.push_back(layer);
+      blocks_->push_back(layer);
     }
     
     // 3. Final layer normalization
@@ -240,16 +241,16 @@ class MistralModelImpl : public torch::nn::Module {
     attention_mask_layer_ = std::make_shared<layer::AttentionMask>();
   }
 
-Output forward(
-    torch::Tensor input_ids,
-    torch::Tensor attention_mask,
-    torch::Tensor position_ids,
-    std::shared_ptr<Cache>& past_key_values,
-    torch::Tensor inputs_embeds,
-    bool use_cache = true,
-    bool output_hidden_states = false,
-    bool output_attentions = false,
-    torch::Tensor cache_position = {}) {
+  Output forward(
+      torch::Tensor input_ids,
+      torch::Tensor attention_mask,
+      torch::Tensor position_ids,
+      std::shared_ptr<Cache>& past_key_values,
+      torch::Tensor inputs_embeds,
+      bool use_cache = true,
+      bool output_hidden_states = false,
+      bool output_attentions = false,
+      torch::Tensor cache_position = {}) {
     
     // 1. Get hidden states
     torch::Tensor hidden_states;
@@ -333,6 +334,7 @@ Output forward(
         {}  // attentions (empty for now)
     };
   }
+
   // ==================== Weight Management ====================
 
   void load_state_dict(const StateDict& state_dict) {
@@ -378,9 +380,9 @@ Output forward(
   
   // Model components
   torch::nn::Embedding embed_tokens_{nullptr};
-  torch::nn::ModuleList decoder_layers_{nullptr};
+  torch::nn::ModuleList blocks_{nullptr};
   std::vector<MistralDecoderLayer> layers_;  // For direct access
-  MistralRMSNorm norm_{nullptr};
+  torch::nn::RMSNorm norm_{nullptr};
   MistralRotaryEmbedding rotary_emb_{nullptr};
   
   // Utility layers

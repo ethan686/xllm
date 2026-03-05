@@ -22,13 +22,12 @@ limitations under the License.
 #include <memory>
 #include <vector>
 
-#include "core/framework/dit_model_loader.h"
 #include "core/framework/kv_cache/kv_cache.h"
 #include "core/framework/model/model_input_params.h"
 #include "core/framework/model_context.h"
+#include "llm_model_base.h"
 #include "models/model_registry.h"
-#include "mistral_model.h"
-#include "xllm_kernels/core/include/atb_speed/log.h"
+#include "mistral.h"
 
 namespace xllm {
 
@@ -42,9 +41,10 @@ struct Mistral3ModelOutputWithPast {
 };
 
 // Mistral3 model (without LM head)
-class Mistral3ModelImpl : public torch::nn::Module {
+class Mistral3ModelImpl : public LlmModelImplBase<MistralDecoderLayer> {
  public:
-  explicit Mistral3ModelImpl(const ModelContext& context) {
+  explicit Mistral3ModelImpl(const ModelContext& context)
+      : LlmModelImplBase<MistralDecoderLayer>("mistral3", context.get_model_args()) {
     auto model_args = context.get_model_args();
     
     language_model_ = register_module("language_model", MistralModel(context));
@@ -99,19 +99,15 @@ struct Mistral3CausalLMOutputWithPast {
 };
 
 // Mistral3 model for conditional generation (text-only)
-class Mistral3ForConditionalGenerationImpl : public torch::nn::Module {
+class Mistral3ForConditionalGenerationImpl : public LlmForCausalLMImplBase<Mistral3Model> {
  public:
-  explicit Mistral3ForConditionalGenerationImpl(const ModelContext& context) {
+  explicit Mistral3ForConditionalGenerationImpl(const ModelContext& context)
+      : LlmForCausalLMImplBase<Mistral3Model>(context) {
     auto model_args = context.get_model_args();
     auto options = context.get_tensor_options();
     
-    model_ = register_module("model", Mistral3Model(context));
-    lm_head_ = register_module(
-        "lm_head",
-        layer::AddMatmul(model_args.mm_hidden_size(), 
-                         model_args.vocab_size(), 
-                         false, 
-                         options));
+    // LlmForCausalLMImplBase already registers model_ and lm_head_
+    // No additional initialization needed
   }
 
   Mistral3CausalLMOutputWithPast forward(
@@ -170,14 +166,15 @@ class Mistral3ForConditionalGenerationImpl : public torch::nn::Module {
   }
 
  private:
-  Mistral3Model model_ = nullptr;
-  layer::AddMatmul lm_head_ = nullptr;
+  // model_ and lm_head_ are inherited from LlmForCausalLMImplBase
+  // No need to declare them here
 };
 TORCH_MODULE(Mistral3ForConditionalGeneration);
 
+// register the causal model
 REGISTER_CAUSAL_MODEL(mistral3, Mistral3ForConditionalGeneration);
 
-// Model registration
+// register the model args
 REGISTER_MODEL_ARGS(mistral3, [&] {
   LOAD_ARG_OR(dtype, "torch_dtype", "bfloat16");
   LOAD_ARG_OR(vocab_size, "vocab_size", 131072);
