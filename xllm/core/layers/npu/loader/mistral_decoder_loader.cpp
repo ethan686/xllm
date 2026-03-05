@@ -30,7 +30,7 @@ limitations under the License.
 namespace xllm {
 namespace layer {
 
-enum MistralDecoderLayerTensorId : int {
+enum VisionEncoderLayerTensorId : int {
   IN_INPUT_NORM_WEIGHT = 0,
   IN_INPUT_NORM_BIAS,
   IN_POST_NORM_WEIGHT,

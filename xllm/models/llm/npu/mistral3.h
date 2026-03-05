@@ -175,8 +175,10 @@ class Mistral3ForConditionalGenerationImpl : public torch::nn::Module {
 };
 TORCH_MODULE(Mistral3ForConditionalGeneration);
 
+REGISTER_CAUSAL_MODEL(mistral3, Mistral3ForConditionalGeneration);
+
 // Model registration
-REGISTER_MODEL_ARGS(Mistral3ForConditionalGeneration, [&] {
+REGISTER_MODEL_ARGS(mistral3, [&] {
   LOAD_ARG_OR(dtype, "torch_dtype", "bfloat16");
   LOAD_ARG_OR(vocab_size, "vocab_size", 131072);
   LOAD_ARG_OR(mm_hidden_size, "hidden_size", 5120);
