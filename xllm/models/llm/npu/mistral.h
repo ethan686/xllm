@@ -25,6 +25,7 @@
 #include "core/framework/kv_cache/kv_cache.h"
 #include "core/framework/model/model_input_params.h"
 #include "core/framework/model_context.h"
+#include "core/layers/npu/npu_mistral_decoder_layer_impl.h"
 #include "llm_model_base.h"
 #include "models/model_registry.h"
 #include "xllm/core/layers/common/add_matmul.h"
