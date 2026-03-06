@@ -16,11 +16,9 @@
 
 // Mistral model compatible with huggingface weights
 namespace xllm {
-
-using InputParameters = xllm::InputParameters;
-using ActivationFunc = xllm::ActivationFunc;
-using CodedChatTemplate = xllm::CodedChatTemplate;
-using AttentionMetadata = xllm::AttentionMetadata;
+torch::Tensor silu(torch::Tensor x) {
+  return x * torch::sigmoid(x);
+}
 
 // ==================== Mistral MLP ====================
 
@@ -30,8 +28,8 @@ class MistralMLPImpl : public torch::nn::Module {
                  const QuantArgs& quant_args,
                  const ParallelArgs& parallel_args,
                  const torch::TensorOptions& options) {
-    act_func_ = Activation::get_act_func("silu", options.device());
-    CHECK(act_func_ != nullptr);
+
+    act_ = register_module("act", torch::nn::Functional(silu));
 
     const int64_t hidden_size = args.hidden_size();
     const int64_t intermediate_size = args.intermediate_size();
@@ -60,7 +58,7 @@ class MistralMLPImpl : public torch::nn::Module {
 
   torch::Tensor forward(torch::Tensor x) {
     const auto gate_up = gate_up_proj_(x);
-    return down_proj_(act_func_(gate_up[0]) * gate_up[1]);
+    return down_proj_(act_(gate_up[0]) * gate_up[1]);
   }
 
   // load the weight from the checkpoint
@@ -80,7 +78,7 @@ class MistralMLPImpl : public torch::nn::Module {
   ColumnParallelLinear gate_up_proj_{nullptr};
   RowParallelLinear down_proj_{nullptr};
 
-  std::shared_ptr<ActivationFunc> act_func_{nullptr};
+  torch::nn::Functional act_ = nullptr;
 };
 TORCH_MODULE(MistralMLP);
 
@@ -135,7 +133,7 @@ class MistralAttentionImpl : public torch::nn::Module {
   torch::Tensor forward(torch::Tensor x,
                         torch::Tensor positions,
                         KVCache& kv_cache,
-                        const InputParameters& input_params) {
+                        const ModelInputParams& input_params) {
     
     auto batch_size = x.size(0);
     auto seq_len = x.size(1);
@@ -281,7 +279,7 @@ class MistralDecoderLayerImpl : public torch::nn::Module {
   torch::Tensor forward(torch::Tensor x,
                         torch::Tensor positions,
                         KVCache& kv_cache,
-                        const InputParameters& input_params) {
+                        const ModelInputParams& input_params) {
     auto h =
         x + self_attn_(input_layernorm_(x), positions, kv_cache, input_params);
     return h + mlp_(post_attention_layernorm_(h));
@@ -353,7 +351,7 @@ class MistralModelImpl : public torch::nn::Module {
   torch::Tensor forward(torch::Tensor tokens,
                         torch::Tensor positions,
                         std::vector<KVCache>& kv_caches,
-                        const InputParameters& input_params) {
+                        const ModelInputParams& input_params) {
     auto h = embed_tokens_(tokens);
 
     for (size_t i = 0; i < layers_.size(); i++) {
@@ -422,7 +420,7 @@ class MistralForCausalLMImpl : public torch::nn::Module {
   torch::Tensor forward(const torch::Tensor& tokens,
                         const torch::Tensor& positions,
                         std::vector<KVCache>& kv_caches,
-                        const InputParameters& input_params) {
+                        const ModelInputParams& input_params) {
     return model_(tokens, positions, kv_caches, input_params);
   }
 
@@ -456,34 +454,6 @@ class MistralForCausalLMImpl : public torch::nn::Module {
   ColumnParallelLinear lm_head_{nullptr};
 };
 TORCH_MODULE(MistralForCausalLM);
-
-// ==================== Chat Template ====================
-
-class MistralChatTemplate final : public CodedChatTemplate {
- public:
-  std::optional<std::string> get_prompt(
-      const std::string_view& system_message,
-      const std::vector<std::string_view>& messages) const override {
-    if (messages.size() % 2 == 0) {
-      return std::nullopt;
-    }
-
-    std::stringstream ss;
-    if (!system_message.empty()) {
-      ss << system_message;
-    }
-
-    for (size_t i = 0; i < messages.size(); ++i) {
-      if (i % 2 == 0) {
-        ss << "[INST] " << messages[i] << " ";
-      } else {
-        ss << "[/INST] " << messages[i] << "</s>";
-      }
-    }
-    ss << "[/INST]";
-    return ss.str();
-  }
-};
 
 // ==================== Registration ====================
 
