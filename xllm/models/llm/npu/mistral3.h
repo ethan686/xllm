@@ -164,10 +164,6 @@ class Mistral3ForConditionalGenerationImpl : public LlmForCausalLMImplBase<Mistr
     lm_head_->verify_loaded_weights("language_model.lm_head.");
     LOG(INFO) << "Mistral3ForConditionalGeneration loaded successfully.";
   }
-
- private:
-  // model_ and lm_head_ are inherited from LlmForCausalLMImplBase
-  // No need to declare them here
 };
 TORCH_MODULE(Mistral3ForConditionalGeneration);
 
