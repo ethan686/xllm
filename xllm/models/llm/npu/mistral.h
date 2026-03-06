@@ -5,36 +5,20 @@
 #include "core/layers/common/activation.h"
 #include "core/layers/common/attention.h"
 #include "core/layers/common/linear.h"
-#include "core/layers/common/normalization.h"
-#include "core/layers/common/embedding.h"
-#include "core/layers/common/qkv_linear.h"
-#include "core/layers/common/attention/handler.h"
 #include "core/framework/kv_cache/kv_cache.h"
 #include "core/framework/model/model_args.h"
-#include "core/framework/model/parameters.h"
+#include "core/framework/model/quant_args.h"
+#include "framework/parallel_state/parallel_args.h"
+#include "framework/state_dict/state_dict.h"
 #include "models/model_registry.h"
-#include "models/chat_template.h"
+#include "common/rms_norm.h"
 
 // Mistral model compatible with huggingface weights
 namespace xllm {
 
-// Forward declarations for types that might be in different namespaces
-using FusedColumnParallelLinear = xllm::ColumnParallelLinear;  // or appropriate type
-using RowParallelLinear = xllm::RowParallelLinear;
-using QKVColumnParallelLinear = xllm::QKVParallelLinear;
-using ParallelEmbedding = xllm::ParallelEmbedding;
-using ColumnParallelLinear = xllm::ColumnParallelLinear;
-using RMSNorm = xllm::RMSNorm;
-using Attention = xllm::Attention;
 using AttentionHandler = xllm::AttentionHandler;
-using KVCache = xllm::KVCache;
 using InputParameters = xllm::InputParameters;
-using ModelArgs = xllm::ModelArgs;
-using QuantArgs = xllm::QuantArgs;
-using ParallelArgs = xllm::ParallelArgs;
-using StateDict = xllm::StateDict;
 using ActivationFunc = xllm::ActivationFunc;
-using Activation = xllm::Activation;
 using CodedChatTemplate = xllm::CodedChatTemplate;
 
 class MistralMLPImpl : public torch::nn::Module {
@@ -52,7 +36,7 @@ class MistralMLPImpl : public torch::nn::Module {
     // register the weight parameter
     gate_up_proj_ = register_module(
         "gate_up_proj",
-        FusedColumnParallelLinear(
+        ColumnParallelLinear(
             hidden_size,
             std::vector<int64_t>{intermediate_size, intermediate_size},
             /*bias=*/false,
