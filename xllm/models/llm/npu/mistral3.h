@@ -30,117 +30,75 @@ limitations under the License.
 #include "mistral.h"
 
 namespace xllm {
-
-// Output structure for Mistral3 model
-struct Mistral3ModelOutputWithPast {
-  torch::Tensor last_hidden_state;           // Final layer output
-  std::shared_ptr<Cache> past_key_values;
-  std::vector<torch::Tensor> hidden_states;  // All layers outputs (if output_hidden_states=True)
-  std::vector<torch::Tensor> attentions;
-  std::vector<torch::Tensor> image_hidden_states;  // Always empty for text-only
-};
-
 // Mistral3 model (without LM head)
-class Mistral3ModelImpl : public LlmModelImplBase<MistralDecoderLayer> {
+class Mistral3ModelImpl : public torch::nn::Module {
  public:
-  explicit Mistral3ModelImpl(const ModelContext& context)
-      : LlmModelImplBase<MistralDecoderLayer>("mistral3", context.get_model_args()) {
-    auto model_args = context.get_model_args();
-    
-    language_model_ = register_module("language_model", MistralModel(context));
+  explicit Mistral3ModelImpl(const ModelArgs& args,
+                   const QuantArgs& quant_args,
+                   const ParallelArgs& parallel_args,
+                   const torch::TensorOptions& options) {   
+    language_model_ = register_module(
+        "language_model",
+        MistralModel(args, quant_args, parallel_args, options));
   }
 
-  Mistral3ModelOutputWithPast forward(
-      torch::Tensor input_ids,
-      torch::Tensor attention_mask,
-      torch::Tensor position_ids,
-      std::shared_ptr<Cache>& past_key_values,
-      torch::Tensor inputs_embeds,
-      bool use_cache,
-      bool output_attentions,
-      bool output_hidden_states,
-      torch::Tensor cache_position) {
-    
-    auto lm_outputs = language_model_->forward(
-        input_ids, attention_mask, position_ids, past_key_values,
-        inputs_embeds, use_cache, output_hidden_states, output_attentions,
-        cache_position);
-    
-    return Mistral3ModelOutputWithPast{
-        lm_outputs.last_hidden_state,  // This is the last layer output
-        lm_outputs.past_key_values,
-        lm_outputs.hidden_states,      // This contains all layers if output_hidden_states=True
-        lm_outputs.attentions,
-        {}  // empty image_hidden_states
-    };
+  torch::Tensor forward(torch::Tensor tokens,
+                        torch::Tensor positions,
+                        std::vector<KVCache>& kv_caches,
+                        const InputParameters& input_params) {   
+    return language_model_->forward(
+        tokens, positions, kv_caches, input_params);
   }
 
   void load_state_dict(const StateDict& state_dict) {
     language_model_->load_state_dict(
-        state_dict.get_dict_with_prefix("model."));
+        state_dict.get_dict_with_prefix("language_model.model."));
   }
 
   void verify_loaded_weights(const std::string& prefix) const {
-    language_model_->verify_loaded_weights(prefix + "model.");
+    language_model_->verify_loaded_weights(prefix + "language_model.model.");
   }
 
  private:
-  MistralModel language_model_ = nullptr;
+  MistralModel language_model_{nullptr};
 };
 TORCH_MODULE(Mistral3Model);
 
-// Output structure for Mistral3 with LM head
-struct Mistral3CausalLMOutputWithPast {
-  torch::Tensor logits;                          // LM head output
-  std::shared_ptr<Cache> past_key_values;
-  std::vector<torch::Tensor> hidden_states;      // All layers outputs (if output_hidden_states=True)
-  std::vector<torch::Tensor> attentions;
-  std::vector<torch::Tensor> image_hidden_states; // Always empty for text-only
-};
-
 // Mistral3 model for conditional generation (text-only)
-class Mistral3ForConditionalGenerationImpl : public LlmForCausalLMImplBase<Mistral3Model> {
+class Mistral3ForConditionalGenerationImpl : public torch::nn::Module {
  public:
-  explicit Mistral3ForConditionalGenerationImpl(const ModelContext& context)
-      : LlmForCausalLMImplBase<Mistral3Model>(context) {
-    auto model_args = context.get_model_args();
-    auto options = context.get_tensor_options();
-    
-    // LlmForCausalLMImplBase already registers model_ and lm_head_
-    // No additional initialization needed
+  Mistral3ForConditionalGenerationImpl(const ModelArgs& args,
+                         const QuantArgs& quant_args,
+                         const ParallelArgs& parallel_args,
+                         const torch::TensorOptions& options) {
+    // register submodules
+    model_ = register_module(
+        "model", Mistral3Model(args, quant_args, parallel_args, options));
+
+    lm_head_ = register_module("lm_head",
+                               ColumnParallelLinear(args.hidden_size(),
+                                                    args.vocab_size(),
+                                                    /*bias=*/false,
+                                                    /*gather_output=*/true,
+                                                    parallel_args,
+                                                    options));
   }
 
-  Mistral3CausalLMOutputWithPast forward(
-      torch::Tensor input_ids,
-      torch::Tensor attention_mask,
-      torch::Tensor position_ids,
-      std::shared_ptr<Cache>& past_key_values,
-      torch::Tensor inputs_embeds,
-      bool use_cache,
-      bool output_attentions,
-      bool output_hidden_states,
-      torch::Tensor cache_position,
-      int64_t logits_to_keep) {
+  torch::Tensor forward(const torch::Tensor& tokens,
+                        const torch::Tensor& positions,
+                        std::vector<KVCache>& kv_caches,
+                        const InputParameters& input_params) {
+    return model_(tokens, positions, kv_caches, input_params);
+  }
     
-    // Forward through base model
-    auto outputs = model_->forward(
-        input_ids, attention_mask, position_ids, past_key_values,
-        inputs_embeds, use_cache, output_attentions, output_hidden_states,
-        cache_position);
-    
-    // Compute logits from last_hidden_state
-    auto hidden_states = outputs.last_hidden_state;
-    int64_t start_idx = hidden_states.size(1) - logits_to_keep;
-    auto logits = lm_head_(
-        hidden_states.slice(1, start_idx, hidden_states.size(1)));
-    
-    return Mistral3CausalLMOutputWithPast{
-        logits,
-        outputs.past_key_values,
-        outputs.hidden_states,    // Pass through all hidden states
-        outputs.attentions,
-        {}  // empty image_hidden_states
-    };
+  torch::Tensor logits(const torch::Tensor& hidden_states,
+                       const torch::Tensor& seleted_idxes) {
+    // select tokens if provided
+    auto h = hidden_states;
+    if (seleted_idxes.defined()) {
+      h = h.index_select(/*dim=*/0, seleted_idxes);
+    }
+    return lm_head_(h);
   }
 
   void load_state_dict(const StateDict& state_dict) {
@@ -164,13 +122,17 @@ class Mistral3ForConditionalGenerationImpl : public LlmForCausalLMImplBase<Mistr
     lm_head_->verify_loaded_weights("language_model.lm_head.");
     LOG(INFO) << "Mistral3ForConditionalGeneration loaded successfully.";
   }
+
+ private:
+  // parameter members, must be registered
+  Mistral3Model model_{nullptr};
+  ColumnParallelLinear lm_head_{nullptr};
 };
 TORCH_MODULE(Mistral3ForConditionalGeneration);
 
-// register the causal model
+// Model registration
 REGISTER_CAUSAL_MODEL(mistral3, Mistral3ForConditionalGeneration);
 
-// register the model args
 REGISTER_MODEL_ARGS(mistral3, [&] {
   LOAD_ARG_OR(dtype, "torch_dtype", "bfloat16");
   LOAD_ARG_OR(vocab_size, "vocab_size", 131072);
@@ -183,6 +145,8 @@ REGISTER_MODEL_ARGS(mistral3, [&] {
   LOAD_ARG_OR(mm_head_dim, "head_dim", 128);
   LOAD_ARG_OR(mm_layer_norm_eps, "rms_norm_eps", 1e-5);
   LOAD_ARG_OR(mm_rope_theta, "rope_theta", 1e9);
+  LOAD_ARG_OR(bos_token_id, "bos_token_id", 1);
+  LOAD_ARG_OR(eos_token_id, "eos_token_id", 2);
 });
 
 } // namespace xllm
