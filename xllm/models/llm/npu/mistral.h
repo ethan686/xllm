@@ -2,20 +2,40 @@
 
 #include <torch/torch.h>
 
-#include "layers/activation.h"
-#include "layers/attention/attention.h"
-#include "layers/attention/handler.h"
-#include "layers/embedding.h"
-#include "layers/linear.h"
-#include "layers/normalization.h"
-#include "layers/qkv_linear.h"
-#include "memory/kv_cache.h"
-#include "models/model_args.h"
+#include "core/layers/common/activation.h"
+#include "core/layers/common/attention.h"
+#include "core/layers/common/linear.h"
+#include "core/layers/common/normalization.h"
+#include "core/layers/common/embedding.h"
+#include "core/layers/common/qkv_linear.h"
+#include "core/layers/common/attention/handler.h"
+#include "core/framework/kv_cache/kv_cache.h"
+#include "core/framework/model/model_args.h"
+#include "core/framework/model/parameters.h"
 #include "models/model_registry.h"
-#include "models/parameters.h"
+#include "models/chat_template.h"
 
 // Mistral model compatible with huggingface weights
-namespace llm::hf {
+namespace xllm {
+
+// Forward declarations for types that might be in different namespaces
+using FusedColumnParallelLinear = xllm::ColumnParallelLinear;  // or appropriate type
+using RowParallelLinear = xllm::RowParallelLinear;
+using QKVColumnParallelLinear = xllm::QKVParallelLinear;
+using ParallelEmbedding = xllm::ParallelEmbedding;
+using ColumnParallelLinear = xllm::ColumnParallelLinear;
+using RMSNorm = xllm::RMSNorm;
+using Attention = xllm::Attention;
+using AttentionHandler = xllm::AttentionHandler;
+using KVCache = xllm::KVCache;
+using InputParameters = xllm::InputParameters;
+using ModelArgs = xllm::ModelArgs;
+using QuantArgs = xllm::QuantArgs;
+using ParallelArgs = xllm::ParallelArgs;
+using StateDict = xllm::StateDict;
+using ActivationFunc = xllm::ActivationFunc;
+using Activation = xllm::Activation;
+using CodedChatTemplate = xllm::CodedChatTemplate;
 
 class MistralMLPImpl : public torch::nn::Module {
  public:
@@ -73,7 +93,7 @@ class MistralMLPImpl : public torch::nn::Module {
   FusedColumnParallelLinear gate_up_proj_{nullptr};
   RowParallelLinear down_proj_{nullptr};
 
-  ActFunc act_func_{nullptr};
+  std::shared_ptr<ActivationFunc> act_func_{nullptr};
 };
 TORCH_MODULE(MistralMLP);
 
@@ -148,7 +168,6 @@ class MistralAttentionImpl : public torch::nn::Module {
  private:
   // parameter members, must be registered
   QKVColumnParallelLinear qkv_proj_{nullptr};
-
   RowParallelLinear o_proj_{nullptr};
 
   // module members without parameters
@@ -207,11 +226,8 @@ class MistralDecoderLayerImpl : public torch::nn::Module {
  private:
   // parameter members, must be registered
   MistralAttention self_attn_{nullptr};
-
   MistralMLP mlp_{nullptr};
-
   RMSNorm input_layernorm_{nullptr};
-
   RMSNorm post_attention_layernorm_{nullptr};
 };
 TORCH_MODULE(MistralDecoderLayer);
@@ -350,7 +366,6 @@ class MistralForCausalLMImpl : public torch::nn::Module {
  private:
   // parameter members, must be registered
   MistralModel model_{nullptr};
-
   ColumnParallelLinear lm_head_{nullptr};
 };
 TORCH_MODULE(MistralForCausalLM);
@@ -416,4 +431,4 @@ REGISTER_MODEL_ARGS(mistral, [&] {
   });
 });
 
-}  // namespace llm::hf
+}  // namespace xllm
