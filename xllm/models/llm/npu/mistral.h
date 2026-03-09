@@ -37,7 +37,7 @@ class MistralMLPImpl : public torch::nn::Module {
     // register the weight parameter
     gate_up_proj_ = register_module(
         "gate_up_proj",
-        ColumnParallelLinear(
+        xllm::layer::ColumnParallelLinear(
             hidden_size,
             std::vector<int64_t>{intermediate_size, intermediate_size},
             /*bias=*/false,
@@ -47,7 +47,7 @@ class MistralMLPImpl : public torch::nn::Module {
             options));
     down_proj_ =
         register_module("down_proj",
-                        RowParallelLinear(intermediate_size,
+                        xllm::layer::RowParallelLinear(intermediate_size,
                                           hidden_size,
                                           /*bias=*/false,
                                           /*input_is_parallelized=*/true,
@@ -65,7 +65,7 @@ class MistralMLPImpl : public torch::nn::Module {
   void load_state_dict(const StateDict& state_dict) {
     // call each submodule's load_state_dict function
     gate_up_proj_->load_state_dict(state_dict, {"gate_proj.", "up_proj."});
-    down_proj_->load_state_dict(state_dict.select("down_proj."));
+    down_proj_->load_state_dict(state_dict.get_dict_with_prefix("down_proj."));
   }
 
   void verify_loaded_weights(const std::string& prefix) const {
@@ -75,8 +75,8 @@ class MistralMLPImpl : public torch::nn::Module {
 
  private:
   // parameter members, must be registered
-  ColumnParallelLinear gate_up_proj_{nullptr};
-  RowParallelLinear down_proj_{nullptr};
+  xllm::layer::ColumnParallelLinear gate_up_proj_{nullptr};
+  xllm::layer::RowParallelLinear down_proj_{nullptr};
 
   torch::nn::Functional act_ = nullptr;
 };
@@ -118,7 +118,7 @@ class MistralAttentionImpl : public torch::nn::Module {
                                                         options));
 
     o_proj_ = register_module("o_proj",
-                              RowParallelLinear(hidden_size,
+                              xllm::layer::RowParallelLinear(hidden_size,
                                                 hidden_size,
                                                 /*bias=*/false,
                                                 /*input_is_parallelized=*/true,
@@ -216,7 +216,7 @@ class MistralAttentionImpl : public torch::nn::Module {
     // call each submodule's load_state_dict function
     qkv_proj_->load_state_dict(
         state_dict, {"q_proj.", "k_proj.", "v_proj."}, {"k_proj.", "v_proj."});
-    o_proj_->load_state_dict(state_dict.select("o_proj."));
+    o_proj_->load_state_dict(state_dict.get_dict_with_prefix("o_proj."));
   }
 
   void verify_loaded_weights(const std::string& prefix) const {
@@ -248,7 +248,7 @@ class MistralAttentionImpl : public torch::nn::Module {
   float scaling_;
 
   QKVColumnParallelLinear qkv_proj_{nullptr};
-  RowParallelLinear o_proj_{nullptr};
+  xllm::layer::RowParallelLinear o_proj_{nullptr};
   std::shared_ptr<RotaryEmbeddingBase> rotary_emb_{nullptr};
 };
 TORCH_MODULE(MistralAttention);
@@ -288,11 +288,11 @@ class MistralDecoderLayerImpl : public torch::nn::Module {
   // load the weight from the checkpoint
   void load_state_dict(const StateDict& state_dict) {
     // call each submodule's load_state_dict function
-    self_attn_->load_state_dict(state_dict.select("self_attn."));
-    mlp_->load_state_dict(state_dict.select("mlp."));
-    input_layernorm_->load_state_dict(state_dict.select("input_layernorm."));
+    self_attn_->load_state_dict(state_dict.get_dict_with_prefix("self_attn."));
+    mlp_->load_state_dict(state_dict.get_dict_with_prefix("mlp."));
+    input_layernorm_->load_state_dict(state_dict.get_dict_with_prefix("input_layernorm."));
     post_attention_layernorm_->load_state_dict(
-        state_dict.select("post_attention_layernorm."));
+        state_dict.get_dict_with_prefix("post_attention_layernorm."));
   }
 
   void verify_loaded_weights(const std::string& prefix) const {
@@ -363,13 +363,13 @@ class MistralModelImpl : public torch::nn::Module {
 
   // load the weight from the checkpoint
   void load_state_dict(const StateDict& state_dict) {
-    embed_tokens_->load_state_dict(state_dict.select("embed_tokens."));
+    embed_tokens_->load_state_dict(state_dict.get_dict_with_prefix("embed_tokens."));
     // rotary_emb 没有需要加载的权重（都是buffer）
     for (int i = 0; i < layers_.size(); i++) {
       layers_[i]->load_state_dict(
-          state_dict.select("layers." + std::to_string(i) + "."));
+          state_dict.get_dict_with_prefix("layers." + std::to_string(i) + "."));
     }
-    norm_->load_state_dict(state_dict.select("norm."));
+    norm_->load_state_dict(state_dict.get_dict_with_prefix("norm."));
   }
 
   void verify_loaded_weights(const std::string& prefix) const {
@@ -406,7 +406,7 @@ class MistralForCausalLMImpl : public torch::nn::Module {
         "model", MistralModel(args, quant_args, parallel_args, options));
 
     lm_head_ = register_module("lm_head",
-                               ColumnParallelLinear(args.hidden_size(),
+                               xllm::layer::ColumnParallelLinear(args.hidden_size(),
                                                     args.vocab_size(),
                                                     /*bias=*/false,
                                                     /*gather_output=*/true,
@@ -439,8 +439,8 @@ class MistralForCausalLMImpl : public torch::nn::Module {
 
   // load the weight from the checkpoint
   void load_state_dict(const StateDict& state_dict) {
-    model_->load_state_dict(state_dict.select("model."));
-    lm_head_->load_state_dict(state_dict.select("lm_head."));
+    model_->load_state_dict(state_dict.get_dict_with_prefix("model."));
+    lm_head_->load_state_dict(state_dict.get_dict_with_prefix("lm_head."));
   }
 
   void verify_loaded_weights() const {
@@ -451,7 +451,7 @@ class MistralForCausalLMImpl : public torch::nn::Module {
  private:
   // parameter members, must be registered
   MistralModel model_{nullptr};
-  ColumnParallelLinear lm_head_{nullptr};
+  xllm::layer::ColumnParallelLinear lm_head_{nullptr};
 };
 TORCH_MODULE(MistralForCausalLM);
 
