@@ -8,7 +8,6 @@
 #include "core/layers/common/rotary_embedding.h"  // 使用现有的 rotary_embedding
 #include "core/framework/kv_cache/kv_cache.h"
 #include "core/framework/model/model_args.h"
-#include "core/framework/quant_args.h"
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/state_dict/state_dict.h"
 #include "models/model_registry.h"
@@ -21,152 +20,13 @@ torch::Tensor silu(torch::Tensor x) {
   return x * torch::sigmoid(x);
 }
 
-// ==================== Mistral MLP ====================
-
-class MistralMLPImpl : public torch::nn::Module {
- public:
-  MistralMLPImpl(const ModelArgs& args,
-                 const QuantArgs& quant_args,
-                 const ParallelArgs& parallel_args,
-                 const torch::TensorOptions& options) {
-
-    act_ = register_module("act", torch::nn::Functional(silu));
-
-    const int64_t hidden_size = args.hidden_size();
-    const int64_t intermediate_size = args.intermediate_size();
-
-    // register the weight parameter
-    gate_up_proj_ = register_module(
-        "gate_up_proj",
-        xllm::layer::ColumnParallelLinear(
-            hidden_size,
-            std::vector<int64_t>{intermediate_size, intermediate_size},
-            /*bias=*/false,
-            /*gather_output=*/false,
-            quant_args,
-            parallel_args,
-            options));
-    down_proj_ =
-        register_module("down_proj",
-                        xllm::layer::RowParallelLinear(intermediate_size,
-                                          hidden_size,
-                                          /*bias=*/false,
-                                          /*input_is_parallelized=*/true,
-                                          quant_args,
-                                          parallel_args,
-                                          options));
-  }
-
-  torch::Tensor forward(torch::Tensor x) {
-    const auto gate_up = gate_up_proj_(x);
-    return down_proj_(act_(gate_up[0]) * gate_up[1]);
-  }
-
-  // load the weight from the checkpoint
-  void load_state_dict(const StateDict& state_dict) {
-    // call each submodule's load_state_dict function
-    gate_up_proj_->load_state_dict(state_dict, {"gate_proj.", "up_proj."});
-    down_proj_->load_state_dict(state_dict.get_dict_with_prefix("down_proj."));
-  }
-
- private:
-  // parameter members, must be registered
-  xllm::layer::ColumnParallelLinear gate_up_proj_{nullptr};
-  xllm::layer::RowParallelLinear down_proj_{nullptr};
-
-  torch::nn::Functional act_ = nullptr;
-};
-TORCH_MODULE(MistralMLP);
-
-// ==================== Mistral Attention ====================
-
-class MistralAttentionImpl : public torch::nn::Module {
- public:
-  MistralAttentionImpl(const ModelArgs& args,
-                       const QuantArgs& quant_args,
-                       const ParallelArgs& parallel_args,
-                       const torch::TensorOptions& options,
-                       std::shared_ptr<RotaryEmbeddingBase> rotary_emb) {
-    const int32_t world_size = parallel_args.world_size();
-    const int64_t hidden_size = args.hidden_size();
-    const int64_t n_heads = args.n_heads();
-    const int64_t n_kv_heads = args.n_kv_heads().value_or(n_heads);
-    const int64_t head_dim = args.head_dim();
-    const int64_t n_local_heads = n_heads / world_size;
-    const int64_t n_local_kv_heads =
-        std::max<int64_t>(1, n_kv_heads / world_size);
-
-    n_local_heads_ = n_local_heads;
-    n_local_kv_heads_ = n_local_kv_heads;
-    head_dim_ = head_dim;
-    scaling_ = 1.0 / std::sqrt(static_cast<float>(head_dim));
-
-    // register submodules
-    qkv_proj_ = register_module("qkv_proj",
-                                xllm::layer::QKVParallelLinear(hidden_size,
-                                                        n_heads,
-                                                        n_kv_heads,
-                                                        head_dim,
-                                                        /*bias=*/false,
-                                                        /*gather_output=*/false,
-                                                        quant_args,
-                                                        parallel_args,
-                                                        options));
-
-    o_proj_ = register_module("o_proj",
-                              xllm::layer::RowParallelLinear(hidden_size,
-                                                hidden_size,
-                                                /*bias=*/false,
-                                                /*input_is_parallelized=*/true,
-                                                quant_args,
-                                                parallel_args,
-                                                options));
-
-    atten_ = register_module(
-        "atten", Attention(n_local_heads, n_local_kv_heads, head_dim, handler));
-  }
-
-  torch::Tensor forward(torch::Tensor x,
-                        torch::Tensor positions,
-                        KVCache& kv_cache,
-                        const ModelInputParams& input_params) {
-    const auto qkv = qkv_proj_(x);
-    // calculate attention, output: (num_tokens, n_local_heads * head_dim)
-    const auto output =
-        atten_(qkv[0], qkv[1], qkv[2], positions, kv_cache, input_params);
-    return o_proj_(output);
-  }
-
-  // load the weight from the checkpoint
-  void load_state_dict(const StateDict& state_dict) {
-    // call each submodule's load_state_dict function
-    qkv_proj_->load_state_dict(
-        state_dict, {"q_proj.", "k_proj.", "v_proj."}, {"k_proj.", "v_proj."});
-    o_proj_->load_state_dict(state_dict.get_dict_with_prefix("o_proj."));
-  }
-
-  void verify_loaded_weights(const std::string& prefix) const {
-    qkv_proj_->verify_loaded_weights(prefix + "[q_proj,k_proj,v_proj].");
-    o_proj_->verify_loaded_weights(prefix + "o_proj.");
-  }
-
- private:
-  xllm::layer::QKVParallelLinear qkv_proj_{nullptr};
-  xllm::layer::RowParallelLinear o_proj_{nullptr};
-  Attention atten_{nullptr};
-};
-TORCH_MODULE(MistralAttention);
-
 // ==================== Mistral Decoder Layer ====================
 
 class MistralDecoderLayerImpl : public torch::nn::Module {
  public:
-  MistralDecoderLayerImpl(const ModelArgs& args,
-                          const QuantArgs& quant_args,
-                          const ParallelArgs& parallel_args,
-                          const torch::TensorOptions& options) {
+  MistralDecoderLayerImpl(const ModelContext& context) {
     decoder_layer_ =
-        register_module("decoder_layer", layer::NpuLlamaDecoderLayer(context));
+        register_module("decoder_layer", layer::NpuMistralDecoderLayer(context));
   }
 
   torch::Tensor forward(torch::Tensor& x,
@@ -211,29 +71,29 @@ TORCH_MODULE(MistralDecoderLayer);
 
 class MistralModelImpl : public torch::nn::Module {
  public:
-  MistralModelImpl(const ModelArgs& args,
-                   const QuantArgs& quant_args,
-                   const ParallelArgs& parallel_args,
-                   const torch::TensorOptions& options) {
+  MistralModelImpl(const ModelContext& context) {
+    auto model_args = context.get_model_args();
+    auto options = context.get_tensor_options();
+    auto parallel_args = context.get_parallel_args();
+
     // register submodules
     embed_tokens_ = register_module(
         "embed_tokens",
         ParallelEmbedding(
-            args.vocab_size(), args.hidden_size(), parallel_args, options));
+            model_args.vocab_size(), model_args.hidden_size(), parallel_args, options));
 
     handler_ = AttentionHandler::create_handler_with_rope(
-        args, /*interleaved=*/false, options);
+        model_args, /*interleaved=*/false, options);
 
     blocks_ = register_module("layers", torch::nn::ModuleList());
-    layers_.reserve(args.n_layers());
-    for (int32_t i = 0; i < args.n_layers(); i++) {
-      auto block = MistralDecoderLayer(
-          args, quant_args, parallel_args, options, rotary_emb_);
+    layers_.reserve(model_args.n_layers());
+    for (int32_t i = 0; i < model_args.n_layers(); i++) {
+      auto block = MistralDecoderLayer(context);
       layers_.push_back(block);
       blocks_->push_back(block);
     }
     norm_ = register_module(
-        "norm", RMSNorm(args.hidden_size(), args.rms_norm_eps(), options));
+        "norm", RMSNorm(model_args.hidden_size(), model_args.rms_norm_eps(), options));
   }
 
   // tokens: [num_tokens]
@@ -317,17 +177,18 @@ TORCH_MODULE(MistralModel);
 
 class MistralForCausalLMImpl : public torch::nn::Module {
  public:
-  MistralForCausalLMImpl(const ModelArgs& args,
-                         const QuantArgs& quant_args,
-                         const ParallelArgs& parallel_args,
-                         const torch::TensorOptions& options) {
+  MistralForCausalLMImpl(const ModelContext& context) {
+    auto model_args = context.get_model_args();
+    auto options = context.get_tensor_options();
+    auto parallel_args = context.get_parallel_args();
+
     // register submodules
     model_ = register_module(
-        "model", MistralModel(args, quant_args, parallel_args, options));
+        "model", MistralModel(context));
 
     lm_head_ = register_module("lm_head",
-                               xllm::layer::ColumnParallelLinear(args.hidden_size(),
-                                                    args.vocab_size(),
+                               xllm::layer::ColumnParallelLinear(model_args.hidden_size(),
+                                                    model_args.vocab_size(),
                                                     /*bias=*/false,
                                                     /*gather_output=*/true,
                                                     parallel_args,
