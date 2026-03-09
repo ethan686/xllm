@@ -111,7 +111,7 @@ class Mistral3ForConditionalGenerationImpl : public torch::nn::Module {
     lm_head_->verify_loaded_weights(prefix + "lm_head.");
   }
 
-  void load_model(std::unique_ptr<DiTFolderLoader> loader) {
+  void load_model(std::unique_ptr<ModelLoader> loader) {
     LOG(INFO) << "Loading Mistral3ForConditionalGeneration from ModelLoader...";
     for (const auto& state_dict : loader->get_state_dicts()) {
       model_->load_state_dict(state_dict->get_dict_with_prefix("language_model."));

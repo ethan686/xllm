@@ -13,6 +13,7 @@
 #include "framework/state_dict/state_dict.h"
 #include "models/model_registry.h"
 #include "core/layers/common/rms_norm.h"
+#include "core/layers/common/rotary_embedding.h"
 
 // Mistral model compatible with huggingface weights
 namespace xllm {
@@ -68,11 +69,6 @@ class MistralMLPImpl : public torch::nn::Module {
     down_proj_->load_state_dict(state_dict.get_dict_with_prefix("down_proj."));
   }
 
-  void verify_loaded_weights(const std::string& prefix) const {
-    gate_up_proj_->verify_loaded_weights(prefix + "[gate_proj,up_proj].");
-    down_proj_->verify_loaded_weights(prefix + "down_proj.");
-  }
-
  private:
   // parameter members, must be registered
   xllm::layer::ColumnParallelLinear gate_up_proj_{nullptr};
@@ -107,7 +103,7 @@ class MistralAttentionImpl : public torch::nn::Module {
 
     // register submodules
     qkv_proj_ = register_module("qkv_proj",
-                                QKVColumnParallelLinear(hidden_size,
+                                xllm::layer::QKVParallelLinear(hidden_size,
                                                         n_heads,
                                                         n_kv_heads,
                                                         head_dim,
@@ -126,89 +122,19 @@ class MistralAttentionImpl : public torch::nn::Module {
                                                 parallel_args,
                                                 options));
 
-    // 保存 rotary embedding
-    rotary_emb_ = rotary_emb;
+    atten_ = register_module(
+        "atten", Attention(n_local_heads, n_local_kv_heads, head_dim, handler));
   }
 
   torch::Tensor forward(torch::Tensor x,
                         torch::Tensor positions,
                         KVCache& kv_cache,
                         const ModelInputParams& input_params) {
-    
-    auto batch_size = x.size(0);
-    auto seq_len = x.size(1);
-    
-    // QKV projection
     const auto qkv = qkv_proj_(x);
-    auto query = qkv[0];
-    auto key = qkv[1];
-    auto value = qkv[2];
-    
-    // Reshape for attention
-    query = query.view({batch_size, seq_len, n_local_heads_, head_dim_})
-                .transpose(1, 2);
-    key = key.view({batch_size, seq_len, n_local_kv_heads_, head_dim_})
-              .transpose(1, 2);
-    value = value.view({batch_size, seq_len, n_local_kv_heads_, head_dim_})
-                .transpose(1, 2);
-    
-    // Apply rotary embeddings using the existing implementation
-    // 准备 cu_query_lens (用于 kernel 调用)
-    torch::Tensor cu_query_lens;
-    if (input_params.is_prefill) {
-      // prefill 阶段
-      cu_query_lens = torch::tensor({0, seq_len}, torch::kInt32)
-                          .to(x.device());
-    } else {
-      // decode 阶段
-      cu_query_lens = torch::tensor({0, 1}, torch::kInt32)
-                          .to(x.device());
-    }
-    
-    // 使用现有的 RotaryEmbedding forward 方法
-    if (auto* rotary = dynamic_cast<RotaryEmbeddingImpl*>(rotary_emb_.get())) {
-      // 对于标准 RoPE
-      rotary->forward(query, key, positions, cu_query_lens, 
-                      input_params.is_prefill ? seq_len : 1,
-                      input_params.is_prefill);
-    } else if (auto* mrotary = dynamic_cast<MRotaryEmbeddingImpl*>(rotary_emb_.get())) {
-      // 对于 Multi-modal RoPE (如果需要)
-      AttentionMetadata attn_metadata;
-      attn_metadata.is_prefill = input_params.is_prefill;
-      attn_metadata.is_chunked_prefill = false;
-      attn_metadata.q_cu_seq_lens = cu_query_lens;
-      attn_metadata.max_query_len = input_params.is_prefill ? seq_len : 1;
-      mrotary->forward(query, key, positions, attn_metadata);
-    }
-    
-    // Update KV cache
-    std::tie(key, value) = kv_cache.update(key, value, input_params);
-    
-    // Repeat k/v heads for GQA
-    if (n_local_kv_heads_ < n_local_heads_) {
-      auto n_rep = n_local_heads_ / n_local_kv_heads_;
-      key = repeat_kv(key, n_rep);
-      value = repeat_kv(value, n_rep);
-    }
-    
-    // Compute attention
-    auto attn_weights = torch::matmul(query, key.transpose(-2, -1)) * scaling_;
-    
-    // Apply causal mask
-    auto causal_mask = create_causal_mask(seq_len, x.device());
-    attn_weights = attn_weights + causal_mask;
-    
-    // Softmax
-    attn_weights = torch::softmax(attn_weights, -1, torch::kFloat32)
-                       .to(query.dtype());
-    
-    // Apply attention to values
-    auto attn_output = torch::matmul(attn_weights, value);
-    attn_output = attn_output.transpose(1, 2)
-                      .contiguous()
-                      .view({batch_size, seq_len, -1});
-    
-    return o_proj_(attn_output);
+    // calculate attention, output: (num_tokens, n_local_heads * head_dim)
+    const auto output =
+        atten_(qkv[0], qkv[1], qkv[2], positions, kv_cache, input_params);
+    return o_proj_(output);
   }
 
   // load the weight from the checkpoint
@@ -225,31 +151,9 @@ class MistralAttentionImpl : public torch::nn::Module {
   }
 
  private:
-  // Helper to repeat kv heads
-  torch::Tensor repeat_kv(const torch::Tensor& x, int64_t n_rep) {
-    if (n_rep == 1) return x;
-    auto shape = x.sizes();
-    return x.unsqueeze(2)
-        .expand({shape[0], shape[1], n_rep, shape[2], shape[3]})
-        .reshape({shape[0], shape[1], shape[2] * n_rep, shape[3]});
-  }
-
-  // Helper to create causal mask
-  torch::Tensor create_causal_mask(int64_t seq_len, torch::Device device) {
-    auto mask = torch::full({seq_len, seq_len}, 
-                           -std::numeric_limits<float>::infinity(),
-                           torch::TensorOptions().device(device));
-    return torch::triu(mask, 1).unsqueeze(0).unsqueeze(0);
-  }
-
-  int64_t n_local_heads_;
-  int64_t n_local_kv_heads_;
-  int64_t head_dim_;
-  float scaling_;
-
-  QKVColumnParallelLinear qkv_proj_{nullptr};
+  xllm::layer::QKVParallelLinear qkv_proj_{nullptr};
   xllm::layer::RowParallelLinear o_proj_{nullptr};
-  std::shared_ptr<RotaryEmbeddingBase> rotary_emb_{nullptr};
+  Attention atten_{nullptr};
 };
 TORCH_MODULE(MistralAttention);
 
@@ -260,29 +164,20 @@ class MistralDecoderLayerImpl : public torch::nn::Module {
   MistralDecoderLayerImpl(const ModelArgs& args,
                           const QuantArgs& quant_args,
                           const ParallelArgs& parallel_args,
-                          const torch::TensorOptions& options,
-                          std::shared_ptr<RotaryEmbeddingBase> rotary_emb) {
-    // register submodules
-    self_attn_ = register_module(
-        "self_attn",
-        MistralAttention(args, quant_args, parallel_args, options, rotary_emb));
-    mlp_ = register_module(
-        "mlp", MistralMLP(args, quant_args, parallel_args, options));
-    input_layernorm_ = register_module(
-        "input_layernorm",
-        RMSNorm(args.hidden_size(), args.rms_norm_eps(), options));
-    post_attention_layernorm_ = register_module(
-        "post_attention_layernorm",
-        RMSNorm(args.hidden_size(), args.rms_norm_eps(), options));
+                          const torch::TensorOptions& options) {
+    decoder_layer_ =
+        register_module("decoder_layer", layer::NpuLlamaDecoderLayer(context));
   }
 
-  torch::Tensor forward(torch::Tensor x,
-                        torch::Tensor positions,
+  torch::Tensor forward(torch::Tensor& x,
+                        torch::Tensor& cos_pos,
+                        torch::Tensor& sin_pos,
+                        torch::Tensor& attn_mask,
                         KVCache& kv_cache,
-                        const ModelInputParams& input_params) {
-    auto h =
-        x + self_attn_(input_layernorm_(x), positions, kv_cache, input_params);
-    return h + mlp_(post_attention_layernorm_(h));
+                        ModelInputParams& input_params,
+                        int node_id) {
+    return decoder_layer_(
+        x, cos_pos, sin_pos, attn_mask, kv_cache, input_params, node_id);
   }
 
   // load the weight from the checkpoint
@@ -326,13 +221,8 @@ class MistralModelImpl : public torch::nn::Module {
         ParallelEmbedding(
             args.vocab_size(), args.hidden_size(), parallel_args, options));
 
-    // 创建 RotaryEmbedding 实例 - 使用现有的工厂函数
-    rotary_emb_ = layer::create_mla_rotary_embedding(
-        args,
-        args.head_dim(),  // rotary_dim
-        args.max_position_embeddings(),
-        /*interleaved=*/false,  // Mistral uses half-half mode
-        options);
+    handler_ = AttentionHandler::create_handler_with_rope(
+        args, /*interleaved=*/false, options);
 
     blocks_ = register_module("layers", torch::nn::ModuleList());
     layers_.reserve(args.n_layers());
@@ -352,13 +242,42 @@ class MistralModelImpl : public torch::nn::Module {
                         torch::Tensor positions,
                         std::vector<KVCache>& kv_caches,
                         const ModelInputParams& input_params) {
-    auto h = embed_tokens_(tokens);
+    torch::Tensor h = embed_tokens_(tokens, 0);
+    auto cos_pos = cos_pos_.index_select(0, positions);
+    auto sin_pos = sin_pos_.index_select(0, positions);
+    ModelInputParams& input_params_new =
+        const_cast<ModelInputParams&>(input_params);
+    // torch::Tensor max_of_seq = torch::max(input_params.kv_seq_lens);
+    // max_seq_len_ = std::max(max_of_seq.item<int>(), max_seq_len_);
+    torch::Tensor max_of_seq = torch::max(input_params.kv_seq_lens);
+    max_seq_len_ = FLAGS_enable_chunked_prefill
+                       ? std::max(max_of_seq.item<int>(), max_seq_len_)
+                       : 128;
+    auto attn_mask = attn_mask_.get_attn_mask(
+        max_seq_len_, cos_pos.dtype().toScalarType(), cos_pos.device());
 
+    if (FLAGS_enable_chunked_prefill) {
+      int batch_size = input_params.q_seq_lens_vec.size();
+      std::vector<torch::Tensor> req_mask_vec;
+      req_mask_vec.reserve(batch_size);
+
+      for (int i = 0; i < batch_size; i++) {
+        int start =
+            input_params.kv_seq_lens_vec[i] - input_params.q_seq_lens_vec[i];
+        int end = input_params.kv_seq_lens_vec[i];
+
+        auto req_mask_slice = attn_mask.slice(0, start, end);
+        req_mask_vec.emplace_back(req_mask_slice);
+      }
+      attn_mask = torch::cat(req_mask_vec, 0);
+    }
     for (size_t i = 0; i < layers_.size(); i++) {
       auto& layer = layers_[i];
-      h = layer(h, positions, kv_caches[i], input_params);
+
+      layer(h, cos_pos, sin_pos, attn_mask, kv_caches[i], input_params_new, i);
     }
-    return norm_(h);
+    auto hidden_states = norm_(h, 0);
+    return ModelOutput(hidden_states);
   }
 
   // load the weight from the checkpoint
@@ -384,7 +303,8 @@ class MistralModelImpl : public torch::nn::Module {
  private:
   // parameter members, must be registered
   ParallelEmbedding embed_tokens_{nullptr};
-  std::shared_ptr<RotaryEmbeddingBase> rotary_emb_{nullptr};
+  
+  std::unique_ptr<AttentionHandler> handler_{nullptr};
 
   torch::nn::ModuleList blocks_{nullptr};
   std::vector<MistralDecoderLayer> layers_;
@@ -448,6 +368,23 @@ class MistralForCausalLMImpl : public torch::nn::Module {
     lm_head_->verify_loaded_weights("lm_head.");
   }
 
+  virtual void prepare_expert_weight(int32_t layer_id,
+                                     const std::vector<int32_t>& expert_ids) {
+    return;
+  }
+  virtual void update_expert_weight(int32_t layer_id) { return; }
+
+  void load_model(std::unique_ptr<ModelLoader> loader) {
+    LOG(INFO) << "Loading MistralForCausalLM from ModelLoader...";
+    for (const auto& state_dict : loader->get_state_dicts()) {
+      model_->load_state_dict(state_dict->get_dict_with_prefix("language_model."));
+      lm_head_->load_state_dict(state_dict->get_dict_with_prefix("language_model.lm_head."));
+    }
+    
+    model_->verify_loaded_weights("language_model.");
+    lm_head_->verify_loaded_weights("language_model.lm_head.");
+    LOG(INFO) << "MistralForCausalLM loaded successfully.";
+  }
  private:
   // parameter members, must be registered
   MistralModel model_{nullptr};
