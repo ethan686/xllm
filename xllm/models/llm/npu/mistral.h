@@ -13,6 +13,8 @@
 #include "models/model_registry.h"
 #include "core/layers/common/rms_norm.h"
 #include "core/layers/common/rotary_embedding.h"
+#include "core/framework/model/model_output.h"
+#include "core/layers/npu/npu_mistral_decoder_layer_impl.h"
 
 // Mistral model compatible with huggingface weights
 namespace xllm {
@@ -49,6 +51,7 @@ class MistralDecoderLayerImpl : public torch::nn::Module {
   void verify_loaded_weights(const std::string& prefix) const {}
 
  private:
+  layer::NpuMistralDecoderLayer decoder_layer_{nullptr};
 };
 TORCH_MODULE(MistralDecoderLayer);
 
