@@ -43,27 +43,12 @@ class MistralDecoderLayerImpl : public torch::nn::Module {
   // load the weight from the checkpoint
   void load_state_dict(const StateDict& state_dict) {
     // call each submodule's load_state_dict function
-    self_attn_->load_state_dict(state_dict.get_dict_with_prefix("self_attn."));
-    mlp_->load_state_dict(state_dict.get_dict_with_prefix("mlp."));
-    input_layernorm_->load_state_dict(state_dict.get_dict_with_prefix("input_layernorm."));
-    post_attention_layernorm_->load_state_dict(
-        state_dict.get_dict_with_prefix("post_attention_layernorm."));
+    decoder_layer_->load_state_dict(state_dict);
   }
 
-  void verify_loaded_weights(const std::string& prefix) const {
-    self_attn_->verify_loaded_weights(prefix + "self_attn.");
-    mlp_->verify_loaded_weights(prefix + "mlp.");
-    input_layernorm_->verify_loaded_weights(prefix + "input_layernorm.");
-    post_attention_layernorm_->verify_loaded_weights(
-        prefix + "post_attention_layernorm.");
-  }
+  void verify_loaded_weights(const std::string& prefix) const {}
 
  private:
-  // parameter members, must be registered
-  MistralAttention self_attn_{nullptr};
-  MistralMLP mlp_{nullptr};
-  RMSNorm input_layernorm_{nullptr};
-  RMSNorm post_attention_layernorm_{nullptr};
 };
 TORCH_MODULE(MistralDecoderLayer);
 
