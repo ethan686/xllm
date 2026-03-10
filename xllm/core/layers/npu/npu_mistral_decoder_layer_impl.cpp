@@ -62,6 +62,7 @@ void NpuMistralDecoderLayerImpl::param_from_args(
     const ModelArgs& args,
     const ParallelArgs& parallel_args,
     bool isPrefill) {
+  // 基础设置
   param.isFA = false;
   param.isPrefill = isPrefill;
   param.isBF16 = args.dtype() == "bfloat16";
@@ -71,26 +72,32 @@ void NpuMistralDecoderLayerImpl::param_from_args(
   param.enableSplitFuse = FLAGS_enable_chunked_prefill && isPrefill;
   param.enableLora = false;
   param.loraEnableGMM = false;
+  
+  // 量化设置（按需调整）
   param.packQuantType = {1, 1};
   param.linearQuantType = {0, -1, -1, 0, 0, -1, 0};
   param.linearTransposeType = {1, -1, -1, 1, 1, -1, 1};
   param.enableKvQuant = false;
   param.quantGroupSize = 0;
-  param.normEps = args.rms_norm_eps();
-  param.normEps = 0.00001;
-  // param.normType = 0;
+  
+  // 归一化参数 - 只保留一行
+  param.normEps = args.rms_norm_eps();  // Mistral 7B通常为1e-5
+  
   param.enableFA3 = false;
+  
+  // 并行设置
   param.worldSize = parallel_args.world_size();
   param.numAttentionHeadsPerRank = args.n_heads() / param.worldSize;
   param.hiddenSizePerAttentionHead = args.hidden_size() / args.n_heads();
-  std::optional<long int> optionalValue = args.n_kv_heads();
-  param.numKeyValueHeadsPerRank =
-      static_cast<int>(optionalValue.value()) / param.worldSize;
+  
+  // GQA设置 - Mistral特有
+  int n_kv_heads = args.n_kv_heads().value_or(8);  // Mistral 7B默认8
+  param.numKeyValueHeadsPerRank = n_kv_heads / param.worldSize;
+  
   param.rank = parallel_args.rank();
   param.backend = "lccl";
   param.tensorParallelInfo = {
       parallel_args.rank(), parallel_args.world_size(), "lccl"};
-  // param.enableLogN = false;
 }
 
 void NpuMistralDecoderLayerImpl::merge_loaded_weights() {
@@ -108,7 +115,7 @@ void NpuMistralDecoderLayerImpl::merge_loaded_weights() {
 
 int64_t NpuMistralDecoderLayerImpl::init_layer() {
   init_attn_mask();
-  name_ = "llama_decoder_layer";
+  name_ = "mistral_decoder_layer";
   model_name_ = "mistral";
   CHECK_OPERATION_STATUS_RETURN(init_node(prefill_node_, prefill_param_));
   CHECK_OPERATION_STATUS_RETURN(init_node(decode_node_, decode_param_));

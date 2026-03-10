@@ -48,6 +48,7 @@ cc_library(
     loader/glm4_moe_decoder_loader.h
     loader/glm4_moe_lite_decoder_loader.h
     loader/llama_decoder_loader.h
+    loader/mistral_decoder_loader.h
     loader/qwen2_vision_encoder_loader.h
     loader/qwen2dot5_vision_encoder_loader.h
     loader/qwen3_vision_encoder_loader.h
@@ -82,7 +83,7 @@ cc_library(
     npu_deepseek_v2_decoder_layer_impl.cpp
     npu_deepseek_v32_decoder_layer_impl.cpp
     npu_llama_decoder_layer_impl.cpp
-    npu_mistral_decoder_layer_impl.cpp
+    npu_mis_decoder_layer_impl.cpp
     npu_qwen2_decoder_layer_impl.cpp
     npu_qwen3_decoder_layer_impl.cpp
     npu_eagle3_decoder_layer_impl.cpp
@@ -101,6 +102,7 @@ cc_library(
     loader/glm4_moe_decoder_loader.cpp
     loader/glm4_moe_lite_decoder_loader.cpp
     loader/llama_decoder_loader.cpp
+    loader/mistral_decoder_loader.cpp
     loader/qwen2_vision_encoder_loader.cpp
     loader/qwen2dot5_vision_encoder_loader.cpp
     loader/qwen3_vision_encoder_loader.cpp

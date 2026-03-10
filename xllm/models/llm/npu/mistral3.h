@@ -49,7 +49,7 @@ class Mistral3ModelImpl : public torch::nn::Module {
 
   void load_state_dict(const StateDict& state_dict) {
     language_model_->load_state_dict(
-        state_dict.get_dict_with_prefix("language_model.model."));
+        state_dict.get_dict_with_prefix("model."));
   }
 
   void verify_loaded_weights(const std::string& prefix) const {
@@ -64,13 +64,10 @@ TORCH_MODULE(Mistral3Model);
 // Mistral3 model for conditional generation (text-only)
 class Mistral3ForConditionalGenerationImpl : public torch::nn::Module {
  public:
-  Mistral3ForConditionalGenerationImpl(const ModelArgs& args,
-                         const QuantArgs& quant_args,
-                         const ParallelArgs& parallel_args,
-                         const torch::TensorOptions& options) {
+  Mistral3ForConditionalGenerationImpl(const ModelContext& context) {
     // register submodules
     model_ = register_module(
-        "model", Mistral3Model(args, quant_args, parallel_args, options));
+        "model", Mistral3Model(context));
 
     lm_head_ = register_module("npu_lm_head", layer::NpuLmHead(context));
   }
@@ -80,7 +77,7 @@ class Mistral3ForConditionalGenerationImpl : public torch::nn::Module {
                         std::vector<KVCache>& kv_caches,
                         const ModelInputParams& input_params) {
     auto hidden_states = model_(tokens, positions, kv_caches, input_params);
-    return ModelOutput(hidden_states)
+    return ModelOutput(hidden_states);
   }
     
   torch::Tensor logits(const torch::Tensor& hidden_states,
@@ -107,8 +104,8 @@ class Mistral3ForConditionalGenerationImpl : public torch::nn::Module {
   void load_model(std::unique_ptr<ModelLoader> loader) {
     LOG(INFO) << "Loading Mistral3ForConditionalGeneration from ModelLoader...";
     for (const auto& state_dict : loader->get_state_dicts()) {
-      model_->load_state_dict(state_dict.get_dict_with_prefix("language_model."));
-      lm_head_->load_state_dict(state_dict.get_dict_with_prefix("language_model.lm_head."));
+      model_->load_state_dict(state_dict->get_dict_with_prefix("language_model."));
+      lm_head_->load_state_dict(state_dict->get_dict_with_prefix("language_model.lm_head."));
     }
     
     model_->verify_loaded_weights("language_model.");
