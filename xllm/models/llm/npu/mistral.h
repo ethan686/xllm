@@ -232,12 +232,7 @@ class MistralForCausalLMImpl : public torch::nn::Module {
   // returns: [num_tokens, vocab_size]
   torch::Tensor logits(const torch::Tensor& hidden_states,
                        const torch::Tensor& seleted_idxes) {
-    // select tokens if provided
-    auto h = hidden_states;
-    if (seleted_idxes.defined()) {
-      h = h.index_select(/*dim=*/0, seleted_idxes);
-    }
-    return lm_head_(h);
+    return lm_head_(hidden_states, seleted_idxes, 0);
   }
 
   // load the weight from the checkpoint
@@ -278,7 +273,6 @@ TORCH_MODULE(MistralForCausalLM);
 // ==================== Registration ====================
 
 REGISTER_CAUSAL_MODEL(mistral, MistralForCausalLM);
-REGISTER_DEFAULT_CHAT_TEMPLATE(mistral, MistralChatTemplate);
 REGISTER_MODEL_ARGS(mistral, [&] {
   LOAD_ARG_OR(model_type, "model_type", "mistral");
   LOAD_ARG_OR(dtype, "torch_dtype", "");
@@ -295,20 +289,18 @@ REGISTER_MODEL_ARGS(mistral, [&] {
   LOAD_ARG_OR(eos_token_id, "eos_token_id", 2);
   LOAD_ARG_OR(rope_theta, "rope_theta", 10000.0f);
   
-  // DeepSeek YARN scaling parameters (optional)
-  LOAD_ARG_OR_FUNC(rope_scaling_rope_type, "rope_scaling_rope_type", [&] {
-    return std::string("default");
-  });
-  LOAD_ARG_OR_FUNC(rope_scaling_factor, "rope_scaling_factor", 1.0f);
-  LOAD_ARG_OR_FUNC(rope_scaling_original_max_position_embeddings, 
-                   "rope_scaling_original_max_position_embeddings", 4096);
-  LOAD_ARG_OR_FUNC(rope_extrapolation_factor, "rope_extrapolation_factor", 1.0f);
-  LOAD_ARG_OR_FUNC(rope_scaling_attn_factor, "rope_scaling_attn_factor", 1.0f);
-  LOAD_ARG_OR_FUNC(rope_scaling_beta_fast, "rope_scaling_beta_fast", 32.0f);
-  LOAD_ARG_OR_FUNC(rope_scaling_beta_slow, "rope_scaling_beta_slow", 1.0f);
-  LOAD_ARG_OR_FUNC(rope_scaling_mscale, "rope_scaling_mscale", 1.0f);
-  LOAD_ARG_OR_FUNC(rope_scaling_mscale_all_dim, "rope_scaling_mscale_all_dim", 1.0f);
+  LOAD_ARG_OR(rope_scaling_rope_type, "rope_scaling_rope_type", "default");
+  LOAD_ARG_OR(rope_scaling_factor, "rope_scaling_factor", 1.0f);
+  LOAD_ARG_OR(rope_scaling_original_max_position_embeddings, 
+              "rope_scaling_original_max_position_embeddings", 4096);
+  LOAD_ARG_OR(rope_extrapolation_factor, "rope_extrapolation_factor", 1.0f);
+  LOAD_ARG_OR(rope_scaling_attn_factor, "rope_scaling_attn_factor", 1.0f);
+  LOAD_ARG_OR(rope_scaling_beta_fast, "rope_scaling_beta_fast", 32.0f);
+  LOAD_ARG_OR(rope_scaling_beta_slow, "rope_scaling_beta_slow", 1.0f);
+  LOAD_ARG_OR(rope_scaling_mscale, "rope_scaling_mscale", 1.0f);
+  LOAD_ARG_OR(rope_scaling_mscale_all_dim, "rope_scaling_mscale_all_dim", 1.0f);
 
+  // head_dim 需要根据 hidden_size 和 n_heads 计算，必须使用 LOAD_ARG_OR_FUNC
   LOAD_ARG_OR_FUNC(head_dim, "head_dim", [&] {
     return args->hidden_size() / args->n_heads();
   });

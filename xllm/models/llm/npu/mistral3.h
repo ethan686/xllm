@@ -33,19 +33,16 @@ namespace xllm {
 // Mistral3 model (without LM head)
 class Mistral3ModelImpl : public torch::nn::Module {
  public:
-  explicit Mistral3ModelImpl(const ModelArgs& args,
-                   const QuantArgs& quant_args,
-                   const ParallelArgs& parallel_args,
-                   const torch::TensorOptions& options) {   
+  explicit Mistral3ModelImpl(const ModelContext& context) {
     language_model_ = register_module(
         "language_model",
-        MistralModel(args, quant_args, parallel_args, options));
+        MistralModel(context));
   }
 
   torch::Tensor forward(torch::Tensor tokens,
                         torch::Tensor positions,
                         std::vector<KVCache>& kv_caches,
-                        const InputParameters& input_params) {   
+                        const ModelInputParams& input_params) {   
     return language_model_->forward(
         tokens, positions, kv_caches, input_params);
   }
@@ -75,30 +72,19 @@ class Mistral3ForConditionalGenerationImpl : public torch::nn::Module {
     model_ = register_module(
         "model", Mistral3Model(args, quant_args, parallel_args, options));
 
-    lm_head_ = register_module("lm_head",
-                               ColumnParallelLinear(args.hidden_size(),
-                                                    args.vocab_size(),
-                                                    /*bias=*/false,
-                                                    /*gather_output=*/true,
-                                                    parallel_args,
-                                                    options));
+    lm_head_ = register_module("npu_lm_head", layer::NpuLmHead(context));
   }
 
   torch::Tensor forward(const torch::Tensor& tokens,
                         const torch::Tensor& positions,
                         std::vector<KVCache>& kv_caches,
-                        const InputParameters& input_params) {
+                        const ModelInputParams& input_params) {
     return model_(tokens, positions, kv_caches, input_params);
   }
     
   torch::Tensor logits(const torch::Tensor& hidden_states,
                        const torch::Tensor& seleted_idxes) {
-    // select tokens if provided
-    auto h = hidden_states;
-    if (seleted_idxes.defined()) {
-      h = h.index_select(/*dim=*/0, seleted_idxes);
-    }
-    return lm_head_(h);
+    return lm_head_(hidden_states, seleted_idxes, 0);
   }
 
   void load_state_dict(const StateDict& state_dict) {
@@ -126,7 +112,7 @@ class Mistral3ForConditionalGenerationImpl : public torch::nn::Module {
  private:
   // parameter members, must be registered
   Mistral3Model model_{nullptr};
-  ColumnParallelLinear lm_head_{nullptr};
+  layer::NpuLmHead lm_head_{nullptr};
 };
 TORCH_MODULE(Mistral3ForConditionalGeneration);
 
@@ -140,7 +126,7 @@ REGISTER_MODEL_ARGS(mistral3, [&] {
   LOAD_ARG_OR(mm_intermediate_size, "intermediate_size", 32768);
   LOAD_ARG_OR(mm_num_hidden_layers, "num_hidden_layers", 40);
   LOAD_ARG_OR(mm_num_attention_heads, "num_attention_heads", 32);
-  LOAD_ARG_OR(mm_num_key_value_heads, "num_key_value_heads", 8);
+  LOAD_ARG_OR(n_kv_heads, "num_key_value_heads", 8);
   LOAD_ARG_OR(max_position_embeddings, "max_position_embeddings", 131072);
   LOAD_ARG_OR(mm_head_dim, "head_dim", 128);
   LOAD_ARG_OR(mm_layer_norm_eps, "rms_norm_eps", 1e-5);
