@@ -56,7 +56,7 @@ class Mistral3ModelImpl : public torch::nn::Module {
   }
 
   void verify_loaded_weights(const std::string& prefix) const {
-    language_model_->verify_loaded_weights(prefix + "language_model.model.");
+    language_model_->verify_loaded_weights(prefix + "model.");
   }
 
  private:

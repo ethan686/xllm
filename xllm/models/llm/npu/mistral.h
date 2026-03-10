@@ -11,8 +11,6 @@
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/state_dict/state_dict.h"
 #include "models/model_registry.h"
-#include "core/layers/common/rms_norm.h"
-#include "core/layers/common/rotary_embedding.h"
 #include "core/framework/model/model_output.h"
 #include "core/layers/npu/npu_mistral_decoder_layer_impl.h"
 
@@ -55,6 +53,39 @@ class MistralDecoderLayerImpl : public torch::nn::Module {
 };
 TORCH_MODULE(MistralDecoderLayer);
 
+std::tuple<torch::Tensor, torch::Tensor> get_mistral_rotary_embedding(
+    int64_t dim,
+    int64_t seq_len,
+    double rope_theta,
+    const torch::TensorOptions& options) {
+  // auto inv_freq = 1.0 / torch::pow(10000, torch::arange(0, dim, 2, options) /
+  // dim);
+  auto options_new =
+      torch::device(options.device()).dtype(at::ScalarType::Double);
+  auto inv_freq =
+      1.0 / torch::pow(rope_theta, torch::arange(0, dim, 2, options_new) / dim)
+                .to(at::ScalarType::Float);
+  auto seq_idx = torch::arange(seq_len, options_new);
+
+  auto freqs = torch::ger(seq_idx, inv_freq).to(torch::kFloat32);
+  auto emb = torch::cat({freqs, freqs}, -1);
+  auto rope_cos = torch::cos(emb);
+  auto rope_sin = torch::sin(emb);
+
+  auto dtype = options.dtype();
+  if (dtype == torch::kFloat16 || dtype == torch::kBFloat16 ||
+      dtype == torch::kInt8) {
+    if (dtype == torch::kBFloat16) {
+      rope_cos = rope_cos.to(torch::kBFloat16);
+      rope_sin = rope_sin.to(torch::kBFloat16);
+    } else {
+      rope_cos = rope_cos.to(torch::kFloat16);
+      rope_sin = rope_sin.to(torch::kFloat16);
+    }
+  }
+  return std::make_tuple(rope_cos, rope_sin);
+}
+
 // ==================== Mistral Model ====================
 
 class MistralModelImpl : public torch::nn::Module {
@@ -64,24 +95,32 @@ class MistralModelImpl : public torch::nn::Module {
     auto options = context.get_tensor_options();
     auto parallel_args = context.get_parallel_args();
 
-    // register submodules
-    embed_tokens_ = register_module(
-        "embed_tokens",
-        ParallelEmbedding(
-            model_args.vocab_size(), model_args.hidden_size(), parallel_args, options));
-
-    handler_ = AttentionHandler::create_handler_with_rope(
-        model_args, /*interleaved=*/false, options);
-
     blocks_ = register_module("layers", torch::nn::ModuleList());
-    layers_.reserve(model_args.n_layers());
+    layers_.reserve(context.get_model_args().n_layers());
+    npu_embed_tokens_ =
+        register_module("npu_embed_tokens", layer::NpuWordEmbedding(context));
+    norm_ = register_module("norm", layer::NpuRMSNorm(context));
+
+    std::tie(cos_pos_, sin_pos_) =
+        get_mistral_rotary_embedding(128,
+                                   model_args.max_position_embeddings(),
+                                   model_args.rope_theta(),
+                                   options);
+    // encode_attn_mask_ =
+    //   layer::AttentionMask(options.device(),
+    //   options.dtype()).get_attn_mask(2048, options.device(),
+    //   options.dtype());
+    int32_t mask_value = FLAGS_enable_chunked_prefill ? -9984 : 1;
+    attn_mask_ = layer::AttentionMask(options.device(),
+                                      options.dtype().toScalarType(),
+                                      /*mask_value=*/mask_value);
+    max_seq_len_ = 0;
+
     for (int32_t i = 0; i < model_args.n_layers(); i++) {
       auto block = MistralDecoderLayer(context);
       layers_.push_back(block);
       blocks_->push_back(block);
     }
-    norm_ = register_module(
-        "norm", RMSNorm(model_args.hidden_size(), model_args.rms_norm_eps(), options));
   }
 
   // tokens: [num_tokens]
@@ -90,7 +129,7 @@ class MistralModelImpl : public torch::nn::Module {
                         torch::Tensor positions,
                         std::vector<KVCache>& kv_caches,
                         const ModelInputParams& input_params) {
-    torch::Tensor h = embed_tokens_(tokens, 0);
+    torch::Tensor h = npu_embed_tokens_(tokens, 0);
     auto cos_pos = cos_pos_.index_select(0, positions);
     auto sin_pos = sin_pos_.index_select(0, positions);
     ModelInputParams& input_params_new =
@@ -121,7 +160,6 @@ class MistralModelImpl : public torch::nn::Module {
     }
     for (size_t i = 0; i < layers_.size(); i++) {
       auto& layer = layers_[i];
-
       layer(h, cos_pos, sin_pos, attn_mask, kv_caches[i], input_params_new, i);
     }
     auto hidden_states = norm_(h, 0);
@@ -148,16 +186,18 @@ class MistralModelImpl : public torch::nn::Module {
     norm_->verify_loaded_weights(prefix + "norm.");
   }
 
- private:
-  // parameter members, must be registered
-  ParallelEmbedding embed_tokens_{nullptr};
-  
-  std::unique_ptr<AttentionHandler> handler_{nullptr};
+ private: 
+  torch::Tensor cos_pos_;
+  torch::Tensor sin_pos_;
+  int max_seq_len_ = 0;
+  int device_id_ = 0;
+  layer::AttentionMask attn_mask_;
+  layer::NpuWordEmbedding npu_embed_tokens_{nullptr};
+  layer::NpuRMSNorm norm_{nullptr};
 
   torch::nn::ModuleList blocks_{nullptr};
+  // hold same data but different type as blocks_ to avoid type cast
   std::vector<MistralDecoderLayer> layers_;
-
-  RMSNorm norm_{nullptr};
 };
 TORCH_MODULE(MistralModel);
 
