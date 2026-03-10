@@ -163,12 +163,12 @@ class MistralModelImpl : public torch::nn::Module {
       layer(h, cos_pos, sin_pos, attn_mask, kv_caches[i], input_params_new, i);
     }
     auto hidden_states = norm_(h, 0);
-    return ModelOutput(hidden_states);
+    return hidden_states;
   }
 
   // load the weight from the checkpoint
   void load_state_dict(const StateDict& state_dict) {
-    embed_tokens_->load_state_dict(state_dict.get_dict_with_prefix("embed_tokens."));
+    npu_embed_tokens_->load_state_dict(state_dict.get_dict_with_prefix("embed_tokens."));
     // rotary_emb 没有需要加载的权重（都是buffer）
     for (int i = 0; i < layers_.size(); i++) {
       layers_[i]->load_state_dict(
@@ -178,7 +178,7 @@ class MistralModelImpl : public torch::nn::Module {
   }
 
   void verify_loaded_weights(const std::string& prefix) const {
-    embed_tokens_->verify_loaded_weights(prefix + "embed_tokens.");
+    npu_embed_tokens_->verify_loaded_weights(prefix + "embed_tokens.");
     for (int i = 0; i < layers_.size(); i++) {
       layers_[i]->verify_loaded_weights(prefix + "layers." + std::to_string(i) +
                                         ".");
@@ -214,13 +214,7 @@ class MistralForCausalLMImpl : public torch::nn::Module {
     model_ = register_module(
         "model", MistralModel(context));
 
-    lm_head_ = register_module("lm_head",
-                               xllm::layer::ColumnParallelLinear(model_args.hidden_size(),
-                                                    model_args.vocab_size(),
-                                                    /*bias=*/false,
-                                                    /*gather_output=*/true,
-                                                    parallel_args,
-                                                    options));
+    lm_head_ = register_module("npu_lm_head", layer::NpuLmHead(context));
   }
 
   // tokens: [num_tokens]
@@ -277,7 +271,7 @@ class MistralForCausalLMImpl : public torch::nn::Module {
  private:
   // parameter members, must be registered
   MistralModel model_{nullptr};
-  xllm::layer::ColumnParallelLinear lm_head_{nullptr};
+  layer::NpuLmHead lm_head_{nullptr};
 };
 TORCH_MODULE(MistralForCausalLM);
 
