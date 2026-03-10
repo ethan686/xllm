@@ -39,12 +39,12 @@ class Mistral3ModelImpl : public torch::nn::Module {
         MistralModel(context));
   }
 
-  torch::Tensor forward(torch::Tensor tokens,
+  ModelOutput forward(torch::Tensor tokens,
                         torch::Tensor positions,
                         std::vector<KVCache>& kv_caches,
                         const ModelInputParams& input_params) {   
-    return language_model_->forward(
-        tokens, positions, kv_caches, input_params);
+    return ModelOutput(language_model_->forward(
+        tokens, positions, kv_caches, input_params));
   }
 
   void load_state_dict(const StateDict& state_dict) {
@@ -75,11 +75,12 @@ class Mistral3ForConditionalGenerationImpl : public torch::nn::Module {
     lm_head_ = register_module("npu_lm_head", layer::NpuLmHead(context));
   }
 
-  torch::Tensor forward(const torch::Tensor& tokens,
+  ModelOutput forward(const torch::Tensor& tokens,
                         const torch::Tensor& positions,
                         std::vector<KVCache>& kv_caches,
                         const ModelInputParams& input_params) {
-    return model_(tokens, positions, kv_caches, input_params);
+    auto hidden_states = model_(tokens, positions, kv_caches, input_params);
+    return ModelOutput(hidden_states)
   }
     
   torch::Tensor logits(const torch::Tensor& hidden_states,
@@ -87,9 +88,15 @@ class Mistral3ForConditionalGenerationImpl : public torch::nn::Module {
     return lm_head_(hidden_states, seleted_idxes, 0);
   }
 
+  virtual void prepare_expert_weight(int32_t layer_id,
+                                     const std::vector<int32_t>& expert_ids) {
+    return;
+  }
+  virtual void update_expert_weight(int32_t layer_id) { return; }
+
   void load_state_dict(const StateDict& state_dict) {
-      model_->load_state_dict(state_dict->get_dict_with_prefix("language_model."));
-      lm_head_->load_state_dict(state_dict->get_dict_with_prefix("language_model.lm_head."));
+      model_->load_state_dict(state_dict.get_dict_with_prefix("language_model."));
+      lm_head_->load_state_dict(state_dict.get_dict_with_prefix("language_model.lm_head."));
   }
 
   void verify_loaded_weights(const std::string& prefix) const {
@@ -100,8 +107,8 @@ class Mistral3ForConditionalGenerationImpl : public torch::nn::Module {
   void load_model(std::unique_ptr<ModelLoader> loader) {
     LOG(INFO) << "Loading Mistral3ForConditionalGeneration from ModelLoader...";
     for (const auto& state_dict : loader->get_state_dicts()) {
-      model_->load_state_dict(state_dict->get_dict_with_prefix("language_model."));
-      lm_head_->load_state_dict(state_dict->get_dict_with_prefix("language_model.lm_head."));
+      model_->load_state_dict(state_dict.get_dict_with_prefix("language_model."));
+      lm_head_->load_state_dict(state_dict.get_dict_with_prefix("language_model.lm_head."));
     }
     
     model_->verify_loaded_weights("language_model.");
@@ -130,7 +137,7 @@ REGISTER_MODEL_ARGS(mistral3, [&] {
   LOAD_ARG_OR(max_position_embeddings, "max_position_embeddings", 131072);
   LOAD_ARG_OR(mm_head_dim, "head_dim", 128);
   LOAD_ARG_OR(mm_layer_norm_eps, "rms_norm_eps", 1e-5);
-  LOAD_ARG_OR(mm_rope_theta, "rope_theta", 1e9);
+  LOAD_ARG_OR(rope_theta, "rope_theta", 1e9);
   LOAD_ARG_OR(bos_token_id, "bos_token_id", 1);
   LOAD_ARG_OR(eos_token_id, "eos_token_id", 2);
 });

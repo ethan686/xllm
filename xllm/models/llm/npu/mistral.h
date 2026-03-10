@@ -29,15 +29,16 @@ class MistralDecoderLayerImpl : public torch::nn::Module {
         register_module("decoder_layer", layer::NpuMistralDecoderLayer(context));
   }
 
-  torch::Tensor forward(torch::Tensor& x,
+  ModelOutput forward(torch::Tensor& x,
                         torch::Tensor& cos_pos,
                         torch::Tensor& sin_pos,
                         torch::Tensor& attn_mask,
                         KVCache& kv_cache,
                         ModelInputParams& input_params,
                         int node_id) {
-    return decoder_layer_(
+    auto hidden_states = decoder_layer_(
         x, cos_pos, sin_pos, attn_mask, kv_cache, input_params, node_id);
+    return ModelOutput(hidden_states);
   }
 
   // load the weight from the checkpoint
@@ -125,7 +126,7 @@ class MistralModelImpl : public torch::nn::Module {
 
   // tokens: [num_tokens]
   // positions: [num_tokens] token pos in the sequence
-  torch::Tensor forward(torch::Tensor tokens,
+  ModelOutput forward(torch::Tensor tokens,
                         torch::Tensor positions,
                         std::vector<KVCache>& kv_caches,
                         const ModelInputParams& input_params) {
@@ -163,7 +164,7 @@ class MistralModelImpl : public torch::nn::Module {
       layer(h, cos_pos, sin_pos, attn_mask, kv_caches[i], input_params_new, i);
     }
     auto hidden_states = norm_(h, 0);
-    return hidden_states;
+    return ModelOutput(hidden_states);
   }
 
   // load the weight from the checkpoint
@@ -220,11 +221,12 @@ class MistralForCausalLMImpl : public torch::nn::Module {
   // tokens: [num_tokens]
   // positions: [num_tokens] token pos in the sequence
   // returns: [num_tokens, hidden_size]
-  torch::Tensor forward(const torch::Tensor& tokens,
+  ModelOutput forward(const torch::Tensor& tokens,
                         const torch::Tensor& positions,
                         std::vector<KVCache>& kv_caches,
                         const ModelInputParams& input_params) {
-    return model_(tokens, positions, kv_caches, input_params);
+    auto hidden_states = model_(tokens, positions, kv_caches, input_params);
+    return ModelOutput(hidden_states);
   }
 
   // hidden_states: [num_tokens, hidden_size]
