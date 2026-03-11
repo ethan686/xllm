@@ -23,9 +23,9 @@ limitations under the License.
 
 namespace xllm {
 
-class Flux2ImageProcessor : public VAEImageProcessorImpl {
+class Flux2ImageProcessorImpl : public VAEImageProcessorImpl {
  public:
-  explicit Flux2ImageProcessor(const ModelContext& context, int64_t vae_scale_factor = 16)
+  explicit Flux2ImageProcessorImpl(const ModelContext& context, int64_t vae_scale_factor = 16)
       : VAEImageProcessorImpl(context, true, true, false, true, false, 32),
         vae_scale_factor_(vae_scale_factor),
         vae_latent_channels_(32) {}
@@ -73,13 +73,12 @@ class Flux2ImageProcessor : public VAEImageProcessorImpl {
                              static_cast<float>(image_width * image_height));
     int64_t width = static_cast<int64_t>(image_width * scale);
     int64_t height = static_cast<int64_t>(image_height * scale);
-
     return torch::nn::functional::interpolate(
-        image.unsqueeze(0),
+        image.unsqueeze(0),  // [1, 3, H, W]
         torch::nn::functional::InterpolateFuncOptions()
             .mode(torch::kBilinear)
             .align_corners(false)
-            .size({1, 3, height, width}))
+            .size(std::vector<int64_t>{height, width}))
         .squeeze(0);
   }
 
@@ -154,5 +153,5 @@ class Flux2ImageProcessor : public VAEImageProcessorImpl {
   int64_t vae_scale_factor_;
   int64_t vae_latent_channels_;
 };
-
+TORCH_MODULE(Flux2ImageProcessor);
 }  // namespace xllm

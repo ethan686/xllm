@@ -103,6 +103,7 @@ struct DiTInputParams {
   torch::Tensor mask_image;
 
   torch::Tensor masked_image_latent;
+
 };
 
 struct DiTRequestState {

@@ -372,6 +372,9 @@ struct ModelArgs {
   PROPERTY(bool, force_upcast) = true;
   PROPERTY(bool, use_quant_conv) = false;
   PROPERTY(bool, use_post_quant_conv) = false;
+  PROPERTY(float, batch_norm_eps) = 1e-04f;
+  PROPERTY(float, batch_norm_momentum) = 0.1f;
+  PROPERTY(std::vector<int64_t>, ae_patch_size) = {};
 
   // dit related args
   PROPERTY(int64_t, joint_attention_dim) = 0;
@@ -379,6 +382,10 @@ struct ModelArgs {
   PROPERTY(bool, guidance_embeds) = true;
   PROPERTY(std::vector<int64_t>, axes_dims_rope) = {};
   PROPERTY(int64_t, num_single_layers) = 0;
+  PROPERTY(float, mlp_ratio) = 3.0f;
+  PROPERTY(int, timestep_guidance_channels) = 256;
+  PROPERTY(double, eps) = 1e-6;
+  PROPERTY(int, patch_size) = 1; 
 
   // t5 related args
   PROPERTY(int64_t, d_model) = 0;

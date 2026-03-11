@@ -22,16 +22,16 @@ limitations under the License.
 #include <string>
 #include <vector>
 
-#include "autoencoder_kl.h"
-#include "core/framework/chat_template/jinja_chat_template.h"
+#include "autoencoder_kl_flux2.h"
+//#include "core/framework/chat_template/jinja_chat_template.h"
 #include "core/framework/dit_model_loader.h"
 #include "core/framework/model_context.h"
 #include "core/framework/request/dit_request_state.h"
 #include "core/framework/state_dict/state_dict.h"
 #include "core/framework/state_dict/utils.h"
-#include "flowmatch_euler_discrete_scheduler.h"
+#include "models/dit/flowmatch_euler_discrete_scheduler.h"
 #include "models/model_registry.h"
-#include "mistral3_encoder.h"
+//#include "mistral3_encoder.h"
 #include "transformer_flux2.h"
 
 namespace xllm {
@@ -72,10 +72,10 @@ inline std::string SYSTEM_MESSAGE_UPSAMPLING_I2I =
     "- Keep content PG-13\n"
     "Output only the final instruction in plain text and nothing else.";
 
-inline std::vector<std::vector<std::unordered_map<std::string, std::string>>>>
+inline std::vector<std::vector<std::unordered_map<std::string, std::string>>>
 format_input(const std::vector<std::string>& prompts,
              const std::string& system_message = SYSTEM_MESSAGE,
-             const std::vector<std::vector<torch::Tensor>>& images = {}) {
+             const std::vector<std::vector<torch::Tensor>>& images = std::vector<std::vector<torch::Tensor>>()) {
   std::vector<std::vector<std::unordered_map<std::string, std::string>>>
       messages_batch;
   messages_batch.reserve(prompts.size());
@@ -119,7 +119,7 @@ float compute_empirical_mu(int64_t image_seq_len, int64_t num_steps) {
   return static_cast<float>(mu);
 }
 
-std::pair<torch::Tensor, int64_t> retrieve_timesteps(
+std::pair<torch::Tensor, int64_t> flux2_retrieve_timesteps(
     FlowMatchEulerDiscreteScheduler scheduler,
     int64_t num_inference_steps = 0,
     torch::Device device = torch::kCPU,
@@ -223,13 +223,13 @@ class Flux2PipelineBaseImpl : public torch::nn::Module {
     std::vector<std::string> formatted_prompts;
     formatted_prompts.reserve(batch_size);
 
-    for (const auto& messages : messages_batch) {
+    /*for (const auto& messages : messages_batch) {
       auto formatted = chat_template_->apply(messages);
       if (!formatted.has_value()) {
         throw std::runtime_error("Failed to apply chat template");
       }
       formatted_prompts.push_back(formatted.value());
-    }
+    }*/
 
     std::vector<std::vector<int32_t>> text_input_ids;
     text_input_ids.reserve(batch_size);
@@ -249,9 +249,8 @@ class Flux2PipelineBaseImpl : public torch::nn::Module {
             .view({batch_size, max_sequence_length})
             .to(options_.device());
 
-    auto hidden_states_output = mistral3_->forward_with_hidden_states(
-        input_ids, hidden_states_layers);
-
+    //auto hidden_states_output = mistral3_->forward_with_hidden_states(input_ids, hidden_states_layers);
+    auto hidden_states_output = torch::empty({1, 512, 256, 768}, torch::kFloat32);
     int64_t num_channels = hidden_states_output.size(1);
     int64_t seq_len = hidden_states_output.size(2);
     int64_t hidden_dim = hidden_states_output.size(3);
@@ -468,11 +467,11 @@ class Flux2PipelineBaseImpl : public torch::nn::Module {
 
 
  protected:
-  Mistral3EncoderModel mistral3_{nullptr};
+  //Mistral3EncoderModel mistral3_{nullptr};
   torch::Device device_ = torch::kCPU;
   torch::ScalarType dtype_;
   std::unique_ptr<Tokenizer> tokenizer_;
-  std::unique_ptr<JinjaChatTemplate> chat_template_;
+  //std::unique_ptr<JinjaChatTemplate> chat_template_;
   torch::TensorOptions options_;
   int tokenizer_max_length_;
   int vae_scale_factor_;

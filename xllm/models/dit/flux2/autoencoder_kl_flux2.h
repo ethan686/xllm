@@ -19,9 +19,9 @@ limitations under the License.
 namespace xllm {
 
 // VAE implementation for Flux2, including encoder and decoder with BatchNorm2d
-class VAEImpl : public torch::nn::Module {
+class Flux2VaeImpl : public torch::nn::Module {
  public:
-  explicit VAEImpl(const ModelContext& context)
+  explicit Flux2VaeImpl(const ModelContext& context)
       : args_(context.get_model_args()) {
     encoder_ = register_module("encoder", VAEEncoder(context));
     decoder_ = register_module("decoder", VAEDecoder(context));
@@ -47,13 +47,23 @@ class VAEImpl : public torch::nn::Module {
     if (args_.use_post_quant_conv()) {
       post_quant_conv_->to(dtype);
     }
+    
+
+    int64_t patch_size_prod = 1;
+    for (auto ps : args_.ae_patch_size()) {
+      patch_size_prod *= ps;
+    }
+    int64_t bn_num_features = patch_size_prod * args_.latent_channels();
 
     bn_ = register_module(
         "bn",
-        torch::nn::BatchNorm2d(torch::nn::BatchNorm2dOptions(
-            2 * args_.latent_channels(),
-            args_.batch_norm_eps(),
-            args_.batch_norm_momentum())));
+        torch::nn::BatchNorm2d(
+            torch::nn::BatchNorm2dOptions(bn_num_features)
+                .eps(args_.batch_norm_eps())
+                .momentum(args_.batch_norm_momentum())
+                .affine(false)
+                .track_running_stats(true)
+    ));
     bn_->to(dtype);
   }
 
@@ -144,6 +154,18 @@ class VAEImpl : public torch::nn::Module {
     CHECK(is_bn_num_batches_tracked_)
         << "num_batches_tracked is not loaded for " << prefix + "bn.num_batches_tracked";
   }
+  
+  torch::Tensor get_bn_running_mean() const {
+    return bn_->running_mean;
+  }
+
+  torch::Tensor get_bn_running_var() const {
+    return bn_->running_var;
+  }
+
+  float get_batch_norm_eps() const {
+    return args_.batch_norm_eps();
+  }
 
  private:
   VAEEncoder encoder_ = nullptr;
@@ -162,7 +184,7 @@ class VAEImpl : public torch::nn::Module {
   bool is_bn_num_batches_tracked_ = false;
   ModelArgs args_;
 };
-TORCH_MODULE(VAE);
+TORCH_MODULE(Flux2Vae);
 
 // register VAE model with the model registry
 REGISTER_MODEL_ARGS(AutoencoderKLFlux2, [&] {
@@ -195,6 +217,6 @@ REGISTER_MODEL_ARGS(AutoencoderKLFlux2, [&] {
   LOAD_ARG_OR(batch_norm_eps, "batch_norm_eps", 1e-04f);
   LOAD_ARG_OR(act_fn, "act_fn", "silu");
   LOAD_ARG_OR(batch_norm_momentum, "batch_norm_momentum", 0.1f);
-  LOAD_ARG_OR(patch_size, "patch_size", (std::vector<int64_t>{2, 2}));
+  LOAD_ARG_OR(ae_patch_size, "patch_size", (std::vector<int64_t>{2, 2}));
 });
 }  // namespace xllm
