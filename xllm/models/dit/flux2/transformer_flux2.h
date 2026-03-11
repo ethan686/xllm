@@ -34,12 +34,13 @@ limitations under the License.
 #include "core/layers/common/rms_norm.h"
 #include "framework/model_context.h"
 #include "models/model_registry.h"
+#include "models/dit/transformer_flux.h"
 #if defined(USE_NPU)
 #include "torch_npu/csrc/aten/CustomFunctions.h"
 #endif
 
 namespace xllm {
-
+/*
 inline torch::Tensor apply_rotary_emb(const torch::Tensor& x,
                                       const torch::Tensor& freqs_cis,
                                       bool head_first = true) {
@@ -130,21 +131,7 @@ torch::Tensor get_1d_rotary_pos_embed(
              << " repeat_interleave_real: " << repeat_interleave_real;
   return torch::Tensor();
 }
-
-class Flux2SwiGLUImpl : public torch::nn::Module {
- public:
-  Flux2SwiGLUImpl() {}
-
-  torch::Tensor forward(const torch::Tensor& x) {
-    auto chunks = x.chunk(2, -1);
-    auto x1 = chunks[0];
-    auto x2 = chunks[1];
-    auto x = torch::silu(x1) * x2;
-    return x;
-  }
-};
-TORCH_MODULE(Flux2SwiGLU);
-
+*/
 class Flux2SwiGLUImpl : public torch::nn::Module {
 public:
     Flux2SwiGLUImpl() {
@@ -397,13 +384,9 @@ class Flux2AttentionImpl : public torch::nn::Module {
 
   void verify_loaded_weights(const std::string& prefix) const {
     fused_qkv_->verify_loaded_weights(prefix + "to_q|to_k|to_v.");
-    norm_q_->verify_loaded_weights(prefix + "norm_q.");
-    norm_k_->verify_loaded_weights(prefix + "norm_k.");
     to_out_->verify_loaded_weights(prefix + "to_out.0.");
 
     if (added_kv_proj_dim_ > 0) {
-      norm_added_q_->verify_loaded_weights(prefix + "norm_added_q.");
-      norm_added_k_->verify_loaded_weights(prefix + "norm_added_k.");
       fused_add_qkv_->verify_loaded_weights(prefix +
                                           "add_q_proj|add_k_proj|add_v_proj.");
       to_add_out_->verify_loaded_weights(prefix + "to_add_out.");
@@ -485,25 +468,23 @@ class Flux2ModulationImpl : public torch::nn::Module {
 };
 TORCH_MODULE(Flux2Modulation);
 
-class TimestepEmbeddingImpl : public torch::nn::Module {
+class Flux2TimestepEmbeddingImpl : public torch::nn::Module {
  public:
-  TimestepEmbeddingImpl(int64_t in_channels,
+  Flux2TimestepEmbeddingImpl(int64_t in_channels,
                       int64_t time_embed_dim,
                       int64_t out_dim = -1,
                       bool sample_proj_bias = true)
       : options_(torch::dtype(torch::kFloat32)) {
     linear_1_ = register_module(
         "linear_1",
-        torch::nn::Linear(torch::nn::LinearOptions(in_channels, time_embed_dim)
-                             .bias(sample_proj_bias)));
+        layer::AddMatmul(in_channels, time_embed_dim, sample_proj_bias, options_));
 
     act_ = register_module("act", torch::nn::SiLU());
 
     int64_t time_embed_dim_out = (out_dim > 0) ? out_dim : time_embed_dim;
     linear_2_ = register_module(
         "linear_2",
-        torch::nn::Linear(torch::nn::LinearOptions(time_embed_dim, time_embed_dim_out)
-                             .bias(sample_proj_bias)));
+        layer::AddMatmul(time_embed_dim, time_embed_dim_out, sample_proj_bias, options_));
   }
 
   torch::Tensor forward(const torch::Tensor& sample) {
@@ -520,26 +501,26 @@ class TimestepEmbeddingImpl : public torch::nn::Module {
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    linear_1_->load_state_dict(state_dict.get_dict_with_prefix("linear_1.weight"));
-    linear_2_->load_state_dict(state_dict.get_dict_with_prefix("linear_2.weight"));
+    linear_1_->load_state_dict(state_dict.get_dict_with_prefix("linear_1."));
+    linear_2_->load_state_dict(state_dict.get_dict_with_prefix("linear_2."));
   }
 
   void verify_loaded_weights(const std::string& prefix) const {
-    linear_1_->verify_loaded_weights(prefix + "linear_1.weight");
-    linear_2_->verify_loaded_weights(prefix + "linear_2.weight");
+    linear_1_->verify_loaded_weights(prefix + "linear_1.");
+    linear_2_->verify_loaded_weights(prefix + "linear_2.");
   }
 
  private:
   torch::TensorOptions options_;
-  torch::nn::Linear linear_1_{nullptr};
+  layer::AddMatmul linear_1_{nullptr};
   torch::nn::SiLU act_{nullptr};
-  torch::nn::Linear linear_2_{nullptr};
+  layer::AddMatmul linear_2_{nullptr};
 };
-TORCH_MODULE(TimestepEmbedding);
+TORCH_MODULE(Flux2TimestepEmbedding);
 
-class TimestepsImpl : public torch::nn::Module {
+class Flux2TimestepsImpl : public torch::nn::Module {
  public:
-  TimestepsImpl(int64_t num_channels,
+  Flux2TimestepsImpl(int64_t num_channels,
                bool flip_sin_to_cos = true,
                float downscale_freq_shift = 0.0,
                int64_t scale = 1)
@@ -596,7 +577,7 @@ torch::Tensor get_timestep_embedding(
     return emb;
 }
 };
-TORCH_MODULE(Timesteps);
+TORCH_MODULE(Flux2Timesteps);
 
 class Flux2TimestepGuidanceEmbeddingsImpl : public torch::nn::Module {
  public:
@@ -609,14 +590,14 @@ class Flux2TimestepGuidanceEmbeddingsImpl : public torch::nn::Module {
 
     time_proj_ = register_module(
         "time_proj",
-        Timesteps(in_channels_, true, 0.0));
+        Flux2Timesteps(in_channels_, true, 0.0));
     timestep_embedder_ = register_module(
         "timestep_embedder",
-        TimestepEmbedding(in_channels_, embedding_dim_, -1, bias));
+        Flux2TimestepEmbedding(in_channels_, embedding_dim_, -1, bias));
     if (guidance_embeds_) {
       guidance_embedder_ = register_module(
           "guidance_embedder",
-          TimestepEmbedding(in_channels_, embedding_dim_, -1, bias));
+          Flux2TimestepEmbedding(in_channels_, embedding_dim_, -1, bias));
     }
   }
 
@@ -654,9 +635,9 @@ class Flux2TimestepGuidanceEmbeddingsImpl : public torch::nn::Module {
   int64_t in_channels_;
   int64_t embedding_dim_;
   bool guidance_embeds_;
-  Timesteps time_proj_{nullptr};
-  TimestepEmbedding timestep_embedder_{nullptr};
-  TimestepEmbedding guidance_embedder_{nullptr};
+  Flux2Timesteps time_proj_{nullptr};
+  Flux2TimestepEmbedding timestep_embedder_{nullptr};
+  Flux2TimestepEmbedding guidance_embedder_{nullptr};
   torch::TensorOptions options_;
 };
 TORCH_MODULE(Flux2TimestepGuidanceEmbeddings);
@@ -705,8 +686,8 @@ class Flux2TransformerBlockImpl : public torch::nn::Module {
       const torch::Tensor& temb_img,
       const torch::Tensor& temb_txt,
       const torch::Tensor& image_rotary_emb) {
-    auto img_mod_params = Flux2Modulation::split(temb_mod_img, 2);
-    auto txt_mod_params = Flux2Modulation::split(temb_mod_txt, 2);
+    auto img_mod_params = Flux2ModulationImpl::split(temb_img, 2);
+    auto txt_mod_params = Flux2ModulationImpl::split(temb_txt, 2);
 
     auto [shift_msa_img, scale_msa_img, gate_msa_img] = img_mod_params[0];
     auto [shift_mlp_img, scale_mlp_img, gate_mlp_img] = img_mod_params[1];
@@ -715,34 +696,34 @@ class Flux2TransformerBlockImpl : public torch::nn::Module {
     auto [shift_mlp_txt, scale_mlp_txt, gate_mlp_txt] = txt_mod_params[1];
 
     auto norm_hidden_states = norm1_->forward(hidden_states);
-    norm_hidden_states = (1 + scale_msa_img.unsqueeze({0, 1})) * norm_hidden_states + shift_msa_img.unsqueeze({0, 1});
+    // norm_hidden_states = (1 + scale_msa_img.unsqueeze({0, 1})) * norm_hidden_states + shift_msa_img.unsqueeze({0, 1});
+    norm_hidden_states = (1 + scale_msa_img.unsqueeze(0).unsqueeze(1)) * norm_hidden_states + shift_msa_img.unsqueeze(0).unsqueeze(1);
 
     auto norm_encoder_hidden_states = norm1_context_->forward(encoder_hidden_states);
-    norm_encoder_hidden_states = (1 + scale_msa_txt.unsqueeze({0, 1})) * norm_encoder_hidden_states + shift_msa_txt.unsqueeze({0, 1});
+    // norm_encoder_hidden_states = (1 + scale_msa_txt.unsqueeze({0, 1})) * norm_encoder_hidden_states + shift_msa_txt.unsqueeze({0, 1});
+    norm_encoder_hidden_states = (1 + scale_msa_txt.unsqueeze(0).unsqueeze(1)) * norm_encoder_hidden_states + shift_msa_txt.unsqueeze(0).unsqueeze(1);
 
-    auto attn_outputs = attn_->forward({
+    auto [attn_output, context_attn_output] = attn_->forward(
         norm_hidden_states,
         norm_encoder_hidden_states,
         image_rotary_emb
-    }).toTuple();
-    auto attn_output = std::get<0>(attn_outputs).toTensor();
-    auto context_attn_output = std::get<1>(attn_outputs).toTensor();
+    );
 
-    attn_output = gate_msa_img.unsqueeze({0, 1}) * attn_output;
+    attn_output = gate_msa_img.unsqueeze(0).unsqueeze(1) * attn_output;
     torch::Tensor new_hidden_states = hidden_states + attn_output;
 
     auto norm_hs = norm2_->forward(new_hidden_states);
-    norm_hs = norm_hs * (1 + scale_mlp_img.unsqueeze({0, 1})) + shift_mlp_img.unsqueeze({0, 1});
+    norm_hs = norm_hs * (1 + scale_mlp_img.unsqueeze(0).unsqueeze(1)) + shift_mlp_img.unsqueeze(0).unsqueeze(1);
     auto ff_output = ff_->forward(norm_hs);
-    new_hidden_states = new_hidden_states + gate_mlp_img.unsqueeze({0, 1}) * ff_output;
+    new_hidden_states = new_hidden_states + gate_mlp_img.unsqueeze(0).unsqueeze(1) * ff_output;
 
-    context_attn_output = gate_msa_txt.unsqueeze({0, 1}) * context_attn_output;
+    context_attn_output = gate_msa_txt.unsqueeze(0).unsqueeze(1) * context_attn_output;
     torch::Tensor new_encoder_hidden_states = encoder_hidden_states + context_attn_output;
 
     auto norm_enc_hs = norm2_context_->forward(new_encoder_hidden_states);
-    norm_enc_hs = norm_enc_hs * (1 + scale_mlp_txt.unsqueeze({0, 1})) + shift_mlp_txt.unsqueeze({0, 1});
+    norm_enc_hs = norm_enc_hs * (1 + scale_mlp_txt.unsqueeze(0).unsqueeze(1)) + shift_mlp_txt.unsqueeze(0).unsqueeze(1);
     auto ff_context_out = ff_context_->forward(norm_enc_hs);
-    new_encoder_hidden_states = new_encoder_hidden_states + gate_mlp_txt.unsqueeze({0, 1}) * ff_context_out;
+    new_encoder_hidden_states = new_encoder_hidden_states + gate_mlp_txt.unsqueeze(0).unsqueeze(1) * ff_context_out;
 
     if (new_encoder_hidden_states.scalar_type() == torch::kFloat16) {
         new_encoder_hidden_states = torch::clamp(new_encoder_hidden_states, -65504.0f, 65504.0f);
@@ -774,7 +755,7 @@ class Flux2TransformerBlockImpl : public torch::nn::Module {
   Flux2FeedForward ff_context_{nullptr};
   torch::TensorOptions options_;
 };
-TORCH_MODULE(Flux2Attention);
+TORCH_MODULE(Flux2TransformerBlock);
 
 class Flux2ParallelSelfAttentionImpl : public torch::nn::Module {
  public:
@@ -812,7 +793,12 @@ class Flux2ParallelSelfAttentionImpl : public torch::nn::Module {
     auto qkv = qkv_mlp[0];
     auto mlp_hidden_states = qkv_mlp[1];
 
-    auto [q, k, v] = torch::chunk(qkv, 3, -1);
+    // auto [q, k, v] = torch::chunk(qkv, 3, -1);
+    auto qkv_chunks = torch::chunk(qkv, 3, -1);
+    auto q = qkv_chunks[0];
+    auto k = qkv_chunks[1];  
+    auto v = qkv_chunks[2];
+
 
     int64_t inner_dim = k.size(-1);
     int64_t attn_heads = heads_;
@@ -864,7 +850,8 @@ class Flux2ParallelSelfAttentionImpl : public torch::nn::Module {
 
     mlp_hidden_states = mlp_act_fn_->forward(mlp_hidden_states);
 
-    auto output = torch::cat({attn_output, mlp_hidden_states}, -1);
+    //auto output = torch::cat({attn_output, mlp_hidden_states}, -1);
+    auto output = torch::cat(std::vector<torch::Tensor>{attn_output, mlp_hidden_states}, -1);
     output = to_out_->forward(output);
 
     return output;
@@ -879,8 +866,6 @@ class Flux2ParallelSelfAttentionImpl : public torch::nn::Module {
 
   void verify_loaded_weights(const std::string& prefix) const {
     to_qkv_mlp_proj_->verify_loaded_weights(prefix + "to_qkv_mlp_proj.");
-    norm_q_->verify_loaded_weights(prefix + "norm_q.");
-    norm_k_->verify_loaded_weights(prefix + "norm_k.");
     to_out_->verify_loaded_weights(prefix + "to_out.");
   }
 
@@ -920,10 +905,9 @@ class Flux2SingleTransformerBlockImpl : public torch::nn::Module {
       const torch::Tensor& hidden_states,
       const torch::Tensor& temb_mod,
       const torch::Tensor& image_rotary_emb,
-      const torch::Tensor& guidance = torch::Tensor(),
       bool split_hidden_states = false,
       int64_t text_seq_len = 0) {
-    auto mod_params = Flux2Modulation::split(temb_mod, 1);
+    auto mod_params = Flux2ModulationImpl::split(temb_mod, 1);
     auto [shift, scale, gate] = mod_params[0];
 
     auto norm_hidden_states = norm_->forward(hidden_states);
@@ -1005,11 +989,7 @@ class Flux2Transformer2DModelImpl : public torch::nn::Module {
       single_transformer_block_layers_.push_back(block);
     }
 
-    norm_out_ = register_module(
-        "norm_out",
-        torch::nn::LayerNorm(torch::nn::LayerNormOptions({inner_dim})
-                                 .elementwise_affine(false)
-                                 .eps(1e-6)));
+    norm_out_ = register_module("norm_out", AdaLayerNormContinuous(context));
     proj_out_ = register_module(
         "proj_out",
         layer::AddMatmul(inner_dim,
@@ -1046,8 +1026,8 @@ class Flux2Transformer2DModelImpl : public torch::nn::Module {
 
     for (int64_t i = 0; i < single_transformer_block_layers_.size(); ++i) {
       auto block = single_transformer_block_layers_[i];
-      hidden_states = block->forward(hidden_states, torch::Tensor(), single_stream_mod,
-                                    image_rotary_emb, torch::Tensor(), false, 0);
+      hidden_states = block->forward(hidden_states, single_stream_mod,
+                                    image_rotary_emb, false, 0);
     }
 
     int64_t start = encoder_hidden_states.size(1);
@@ -1056,7 +1036,7 @@ class Flux2Transformer2DModelImpl : public torch::nn::Module {
         hidden_states.narrow(1, start, std::max(length, int64_t(0)));
     hidden_states = output_hidden;
 
-    auto output_hidden_final = norm_out_->forward(hidden_states);
+    auto output_hidden_final = norm_out_->forward(hidden_states, temb);
     return proj_out_->forward(output_hidden_final);
   }
 
@@ -1084,8 +1064,8 @@ class Flux2Transformer2DModelImpl : public torch::nn::Module {
         block->load_state_dict(state_dict->get_dict_with_prefix(
             "single_transformer_blocks." + std::to_string(i) + "."));
       }
-      norm_out_->load_state_dict(state_dict.get_dict_with_prefix("norm_out."));
-      proj_out_->load_state_dict(state_dict.get_dict_with_prefix("proj_out."));
+      norm_out_->load_state_dict(state_dict->get_dict_with_prefix("norm_out."));
+      proj_out_->load_state_dict(state_dict->get_dict_with_prefix("proj_out."));
     }
   }
 
@@ -1094,7 +1074,7 @@ class Flux2Transformer2DModelImpl : public torch::nn::Module {
     x_embedder_->verify_loaded_weights(prefix + "x_embedder.");
     time_guidance_embed_->verify_loaded_weights(prefix + "time_guidance_embed.");
     double_stream_modulation_img_->verify_loaded_weights(prefix + "double_stream_modulation_img.");
-    double_stream_modulation_txt_-verify_loaded_weights(prefix + "double_stream_modulation_txt.");
+    double_stream_modulation_txt_->verify_loaded_weights(prefix + "double_stream_modulation_txt.");
     single_stream_modulation_->verify_loaded_weights(prefix + "single_stream_modulation.");
     for (int64_t i = 0; i < transformer_block_layers_.size(); ++i) {
       auto block = transformer_block_layers_[i];
@@ -1125,7 +1105,7 @@ class Flux2Transformer2DModelImpl : public torch::nn::Module {
   std::vector<Flux2TransformerBlock> transformer_block_layers_;
   torch::nn::ModuleList single_transformer_blocks_{nullptr};
   std::vector<Flux2SingleTransformerBlock> single_transformer_block_layers_;
-  torch::nn::LayerNorm norm_out_{nullptr};
+  AdaLayerNormContinuous norm_out_{nullptr};
   layer::AddMatmul proj_out_{nullptr};
   torch::TensorOptions options_;
 };
@@ -1136,7 +1116,7 @@ class Flux2DiTModelImpl : public torch::nn::Module {
   explicit Flux2DiTModelImpl(const ModelContext& context)
       : options_(context.get_tensor_options()) {
     flux2_transformer_2d_model_ = register_module(
-        "flux2_transformer_2d_model", Flux2Transformer2DModel(context));
+        "flux2_transformer_2d_model_", Flux2Transformer2DModel(context));
   }
 
   torch::Tensor forward(const torch::Tensor& hidden_states_input,
@@ -1145,17 +1125,14 @@ class Flux2DiTModelImpl : public torch::nn::Module {
                         const torch::Tensor& guidance,
                         const torch::Tensor& image_rotary_emb) {
     torch::Tensor output =
-        flux2_transformer_2d_model->forward(hidden_states_input,
+        flux2_transformer_2d_model_->forward(hidden_states_input,
                                             encoder_hidden_states_input,
                                             timestep,
                                             guidance,
                                             image_rotary_emb);
     return output;
   }
-  int64_t in_channels() { return flux2_transformer_2d_model->in_channels(); }
-  bool guidance_embeds() {
-    return flux2_transformer_2d_model->guidance_embeds();
-  }
+  int64_t in_channels() { return flux2_transformer_2d_model_->in_channels(); }
 
   void load_model(std::unique_ptr<DiTFolderLoader> loader) {
     flux2_transformer_2d_model_->load_model(std::move(loader));
