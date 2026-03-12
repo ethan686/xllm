@@ -36,21 +36,6 @@ torch::Tensor silu(torch::Tensor x) {
   return x * torch::sigmoid(x);
 }
 
-torch::Tensor _create_4d_causal_attention_mask(torch::IntArrayRef input_shape,
-                                               torch::Dtype dtype,
-                                               torch::Device device) {
-  const int64_t bsz = input_shape[0];
-  const int64_t tgt_len = input_shape[1];
-
-  auto options = torch::TensorOptions().dtype(dtype).device(device);
-  auto causal_mask = torch::full(
-      {tgt_len, tgt_len}, -std::numeric_limits<double>::infinity(), options);
-  causal_mask.triu_(1);
-  causal_mask = causal_mask.unsqueeze(0).unsqueeze(0);
-  causal_mask = causal_mask.expand({bsz, 1, tgt_len, tgt_len});
-  return causal_mask;
-}
-
 // ==================== Mistral Decoder Layer ====================
 
 class MistralDecoderLayerImpl : public torch::nn::Module {
@@ -110,6 +95,21 @@ class MistralDecoderLayerImpl : public torch::nn::Module {
       decoder_layer_->reload_weights_from_device();
     }
   }
+
+  torch::Tensor _create_4d_causal_attention_mask(torch::IntArrayRef input_shape,
+                                               torch::Dtype dtype,
+                                               torch::Device device) {
+  const int64_t bsz = input_shape[0];
+  const int64_t tgt_len = input_shape[1];
+
+  auto options = torch::TensorOptions().dtype(dtype).device(device);
+  auto causal_mask = torch::full(
+      {tgt_len, tgt_len}, -std::numeric_limits<double>::infinity(), options);
+  causal_mask.triu_(1);
+  causal_mask = causal_mask.unsqueeze(0).unsqueeze(0);
+  causal_mask = causal_mask.expand({bsz, 1, tgt_len, tgt_len});
+  return causal_mask;
+}
 
  private:
   layer::NpuMistralDecoderLayer decoder_layer_{nullptr};
@@ -207,7 +207,7 @@ class MistralModelImpl : public torch::nn::Module {
     int64_t batch_size = input_params.kv_seq_lens_vec.size();  // 从 input_params 获取
     int64_t seq_len = tokens.size(0) / batch_size;  // 计算序列长度
     
-    auto attn_mask = create_4d_causal_attention_mask(
+    auto attn_mask = _create_4d_causal_attention_mask(
         {batch_size, seq_len},
         h.scalar_type(),
         h.device()
@@ -444,7 +444,7 @@ REGISTER_MODEL_ARGS(mistral, [&] {
   LOAD_ARG_OR(hidden_size, "hidden_size", 4096);
   LOAD_ARG_OR(n_layers, "num_hidden_layers", 32);
   LOAD_ARG_OR(n_heads, "num_attention_heads", 32);
-  LOAD_ARG(n_kv_heads, "num_key_value_heads"， 8);
+  LOAD_ARG_OR(n_kv_heads, "num_key_value_heads", 8);
   LOAD_ARG_OR(intermediate_size, "intermediate_size", 14336);
   LOAD_ARG_OR(hidden_act, "hidden_act", "silu");
   LOAD_ARG_OR(max_position_embeddings, "max_position_embeddings", 4096 * 32);
