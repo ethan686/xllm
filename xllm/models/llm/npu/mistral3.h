@@ -42,7 +42,7 @@ class Mistral3ModelImpl : public torch::nn::Module {
   ModelOutput forward(torch::Tensor tokens,
                         torch::Tensor positions,
                         std::vector<KVCache>& kv_caches,
-                        const ModelInputParams& input_params) {   
+                        const ModelInputParams& input_params) {
     return ModelOutput(language_model_->forward(
         tokens, positions, kv_caches, input_params));
   }
@@ -54,6 +54,38 @@ class Mistral3ModelImpl : public torch::nn::Module {
 
   void verify_loaded_weights(const std::string& prefix) const {
     language_model_->verify_loaded_weights(prefix + "model.");
+  }
+
+  // 添加生命周期函数
+  void merge_loaded_weights() {
+    LOG(INFO) << "Merging loaded weights for Mistral3Model";
+    if (language_model_) {
+      language_model_->merge_loaded_weights();
+    }
+  }
+
+  void merge_and_move_pinned_host() {
+    if (language_model_) {
+      language_model_->merge_and_move_pinned_host();
+    }
+  }
+
+  void free_weights() {
+    if (language_model_) {
+      language_model_->free_weights();
+    }
+  }
+
+  void reload_weights() {
+    if (language_model_) {
+      language_model_->reload_weights();
+    }
+  }
+
+  void reload_weights_from_device() {
+    if (language_model_) {
+      language_model_->reload_weights_from_device();
+    }
   }
 
  private:
@@ -79,7 +111,7 @@ class Mistral3ForConditionalGenerationImpl : public torch::nn::Module {
     auto hidden_states = model_(tokens, positions, kv_caches, input_params);
     return ModelOutput(hidden_states);
   }
-    
+
   torch::Tensor logits(const torch::Tensor& hidden_states,
                        const torch::Tensor& seleted_idxes) {
     return lm_head_(hidden_states, seleted_idxes, 0);
@@ -107,10 +139,64 @@ class Mistral3ForConditionalGenerationImpl : public torch::nn::Module {
       model_->load_state_dict(state_dict->get_dict_with_prefix("language_model."));
       lm_head_->load_state_dict(state_dict->get_dict_with_prefix("language_model.lm_head."));
     }
-    
+
+    // 关键：添加 merge_loaded_weights 调用！
+    if (model_) {
+      model_->merge_loaded_weights();
+    }
+    if (lm_head_) {
+      lm_head_->merge_loaded_weights();
+    }
+
     model_->verify_loaded_weights("language_model.");
     lm_head_->verify_loaded_weights("language_model.lm_head.");
     LOG(INFO) << "Mistral3ForConditionalGeneration loaded successfully.";
+  }
+
+  // 添加生命周期函数
+  void merge_loaded_weights() {
+    if (model_) {
+      model_->merge_loaded_weights();
+    }
+    if (lm_head_) {
+      lm_head_->merge_loaded_weights();
+    }
+  }
+
+  void merge_and_move_pinned_host() {
+    if (model_) {
+      model_->merge_and_move_pinned_host();
+    }
+    if (lm_head_) {
+      lm_head_->merge_and_move_pinned_host();
+    }
+  }
+
+  void free_weights() {
+    if (model_) {
+      model_->free_weights();
+    }
+    if (lm_head_) {
+      lm_head_->free_weights();
+    }
+  }
+
+  void reload_weights() {
+    if (model_) {
+      model_->reload_weights();
+    }
+    if (lm_head_) {
+      lm_head_->reload_weights();
+    }
+  }
+
+  void reload_weights_from_device() {
+    if (model_) {
+      model_->reload_weights_from_device();
+    }
+    if (lm_head_) {
+      lm_head_->reload_weights_from_device();
+    }
   }
 
  private:
@@ -124,16 +210,17 @@ TORCH_MODULE(Mistral3ForConditionalGeneration);
 REGISTER_CAUSAL_MODEL(mistral3, Mistral3ForConditionalGeneration);
 
 REGISTER_MODEL_ARGS(mistral3, [&] {
+  LOAD_ARG_OR(model_type, "model_type", "mistral3");
   LOAD_ARG_OR(dtype, "torch_dtype", "bfloat16");
   LOAD_ARG_OR(vocab_size, "vocab_size", 131072);
-  LOAD_ARG_OR(mm_hidden_size, "hidden_size", 5120);
-  LOAD_ARG_OR(mm_intermediate_size, "intermediate_size", 32768);
-  LOAD_ARG_OR(mm_num_hidden_layers, "num_hidden_layers", 40);
-  LOAD_ARG_OR(mm_num_attention_heads, "num_attention_heads", 32);
+  LOAD_ARG_OR(hidden_size, "hidden_size", 5120);
+  LOAD_ARG_OR(intermediate_size, "intermediate_size", 32768);
+  LOAD_ARG_OR(n_layers, "num_hidden_layers", 40);
+  LOAD_ARG_OR(n_heads, "num_attention_heads", 32);
   LOAD_ARG_OR(n_kv_heads, "num_key_value_heads", 8);
   LOAD_ARG_OR(max_position_embeddings, "max_position_embeddings", 131072);
-  LOAD_ARG_OR(mm_head_dim, "head_dim", 128);
-  LOAD_ARG_OR(mm_layer_norm_eps, "rms_norm_eps", 1e-5);
+  LOAD_ARG_OR(head_dim, "head_dim", 128);
+  LOAD_ARG_OR(rms_norm_eps, "rms_norm_eps", 1e-5);
   LOAD_ARG_OR(rope_theta, "rope_theta", 1e9);
   LOAD_ARG_OR(bos_token_id, "bos_token_id", 1);
   LOAD_ARG_OR(eos_token_id, "eos_token_id", 2);

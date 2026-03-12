@@ -1,3 +1,19 @@
+/* Copyright 2025 The xLLM Authors. All Rights Reserved.
+Copyright 2024 The ScaleLLM Authors. All Rights Reserved.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    https://github.com/jd-opensource/xllm/blob/main/LICENSE
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================*/
+
 #pragma once
 
 #include <torch/torch.h>
@@ -18,6 +34,21 @@
 namespace xllm {
 torch::Tensor silu(torch::Tensor x) {
   return x * torch::sigmoid(x);
+}
+
+torch::Tensor _create_4d_causal_attention_mask(torch::IntArrayRef input_shape,
+                                               torch::Dtype dtype,
+                                               torch::Device device) {
+  const int64_t bsz = input_shape[0];
+  const int64_t tgt_len = input_shape[1];
+
+  auto options = torch::TensorOptions().dtype(dtype).device(device);
+  auto causal_mask = torch::full(
+      {tgt_len, tgt_len}, -std::numeric_limits<double>::infinity(), options);
+  causal_mask.triu_(1);
+  causal_mask = causal_mask.unsqueeze(0).unsqueeze(0);
+  causal_mask = causal_mask.expand({bsz, 1, tgt_len, tgt_len});
+  return causal_mask;
 }
 
 // ==================== Mistral Decoder Layer ====================
@@ -48,6 +79,37 @@ class MistralDecoderLayerImpl : public torch::nn::Module {
   }
 
   void verify_loaded_weights(const std::string& prefix) const {}
+
+  // 添加缺失的生命周期函数
+  void merge_loaded_weights() {
+    if (decoder_layer_) {
+      decoder_layer_->merge_loaded_weights();
+    }
+  }
+
+  void merge_and_move_pinned_host() {
+    if (decoder_layer_) {
+      decoder_layer_->merge_and_move_pinned_host();
+    }
+  }
+
+  void free_weights() {
+    if (decoder_layer_) {
+      decoder_layer_->free_weights();
+    }
+  }
+
+  void reload_weights() {
+    if (decoder_layer_) {
+      decoder_layer_->reload_weights();
+    }
+  }
+
+  void reload_weights_from_device() {
+    if (decoder_layer_) {
+      decoder_layer_->reload_weights_from_device();
+    }
+  }
 
  private:
   layer::NpuMistralDecoderLayer decoder_layer_{nullptr};
@@ -141,8 +203,15 @@ class MistralModelImpl : public torch::nn::Module {
     max_seq_len_ = FLAGS_enable_chunked_prefill
                        ? std::max(max_of_seq.item<int>(), max_seq_len_)
                        : 128;
-    auto attn_mask = attn_mask_.get_attn_mask(
-        max_seq_len_, cos_pos.dtype().toScalarType(), cos_pos.device());
+    
+    int64_t batch_size = input_params.kv_seq_lens_vec.size();  // 从 input_params 获取
+    int64_t seq_len = tokens.size(0) / batch_size;  // 计算序列长度
+    
+    auto attn_mask = create_4d_causal_attention_mask(
+        {batch_size, seq_len},
+        h.scalar_type(),
+        h.device()
+    );
 
     if (FLAGS_enable_chunked_prefill) {
       int batch_size = input_params.q_seq_lens_vec.size();
@@ -187,7 +256,92 @@ class MistralModelImpl : public torch::nn::Module {
     norm_->verify_loaded_weights(prefix + "norm.");
   }
 
- private: 
+  // 添加缺失的生命周期函数
+  void merge_loaded_weights() {
+    LOG(INFO) << "Merging loaded weights for MistralModel";
+
+    if (npu_embed_tokens_) {
+      npu_embed_tokens_->merge_loaded_weights();
+    }
+
+    for (auto& layer : layers_) {
+      if (layer) {
+        layer->merge_loaded_weights();
+      }
+    }
+
+    if (norm_) {
+      norm_->merge_loaded_weights();
+    }
+
+    LOG(INFO) << "MistralModel merge_loaded_weights completed";
+  }
+
+  void merge_and_move_pinned_host() {
+    if (npu_embed_tokens_) {
+      npu_embed_tokens_->merge_and_move_pinned_host();
+    }
+
+    for (auto& layer : layers_) {
+      if (layer) {
+        layer->merge_and_move_pinned_host();
+      }
+    }
+
+    if (norm_) {
+      norm_->merge_and_move_pinned_host();
+    }
+  }
+
+  void free_weights() {
+    if (npu_embed_tokens_) {
+      npu_embed_tokens_->free_weights();
+    }
+
+    for (auto& layer : layers_) {
+      if (layer) {
+        layer->free_weights();
+      }
+    }
+
+    if (norm_) {
+      norm_->free_weights();
+    }
+  }
+
+  void reload_weights() {
+    if (npu_embed_tokens_) {
+      npu_embed_tokens_->reload_weights();
+    }
+
+    for (auto& layer : layers_) {
+      if (layer) {
+        layer->reload_weights();
+      }
+    }
+
+    if (norm_) {
+      norm_->reload_weights();
+    }
+  }
+
+  void reload_weights_from_device() {
+    if (npu_embed_tokens_) {
+      npu_embed_tokens_->reload_weights_from_device();
+    }
+
+    for (auto& layer : layers_) {
+      if (layer) {
+        layer->reload_weights_from_device();
+      }
+    }
+
+    if (norm_) {
+      norm_->reload_weights_from_device();
+    }
+  }
+
+ private:
   torch::Tensor cos_pos_;
   torch::Tensor sin_pos_;
   int max_seq_len_ = 0;
@@ -260,7 +414,15 @@ class MistralForCausalLMImpl : public torch::nn::Module {
       model_->load_state_dict(state_dict->get_dict_with_prefix("language_model."));
       lm_head_->load_state_dict(state_dict->get_dict_with_prefix("language_model.lm_head."));
     }
-    
+
+    // 关键：添加 merge_loaded_weights 调用！
+    if (model_) {
+      model_->merge_loaded_weights();
+    }
+    if (lm_head_) {
+      lm_head_->merge_loaded_weights();
+    }
+
     model_->verify_loaded_weights("language_model.");
     lm_head_->verify_loaded_weights("language_model.lm_head.");
     LOG(INFO) << "MistralForCausalLM loaded successfully.";
@@ -282,7 +444,7 @@ REGISTER_MODEL_ARGS(mistral, [&] {
   LOAD_ARG_OR(hidden_size, "hidden_size", 4096);
   LOAD_ARG_OR(n_layers, "num_hidden_layers", 32);
   LOAD_ARG_OR(n_heads, "num_attention_heads", 32);
-  LOAD_ARG(n_kv_heads, "num_key_value_heads");
+  LOAD_ARG(n_kv_heads, "num_key_value_heads"， 8);
   LOAD_ARG_OR(intermediate_size, "intermediate_size", 14336);
   LOAD_ARG_OR(hidden_act, "hidden_act", "silu");
   LOAD_ARG_OR(max_position_embeddings, "max_position_embeddings", 4096 * 32);
@@ -290,10 +452,10 @@ REGISTER_MODEL_ARGS(mistral, [&] {
   LOAD_ARG_OR(bos_token_id, "bos_token_id", 1);
   LOAD_ARG_OR(eos_token_id, "eos_token_id", 2);
   LOAD_ARG_OR(rope_theta, "rope_theta", 10000.0f);
-  
+
   LOAD_ARG_OR(rope_scaling_rope_type, "rope_scaling_rope_type", "default");
   LOAD_ARG_OR(rope_scaling_factor, "rope_scaling_factor", 1.0f);
-  LOAD_ARG_OR(rope_scaling_original_max_position_embeddings, 
+  LOAD_ARG_OR(rope_scaling_original_max_position_embeddings,
               "rope_scaling_original_max_position_embeddings", 4096);
   LOAD_ARG_OR(rope_extrapolation_factor, "rope_extrapolation_factor", 1.0f);
   LOAD_ARG_OR(rope_scaling_attn_factor, "rope_scaling_attn_factor", 1.0f);

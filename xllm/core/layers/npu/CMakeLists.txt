@@ -83,7 +83,7 @@ cc_library(
     npu_deepseek_v2_decoder_layer_impl.cpp
     npu_deepseek_v32_decoder_layer_impl.cpp
     npu_llama_decoder_layer_impl.cpp
-    npu_mis_decoder_layer_impl.cpp
+    npu_mistral_decoder_layer_impl.cpp
     npu_qwen2_decoder_layer_impl.cpp
     npu_qwen3_decoder_layer_impl.cpp
     npu_eagle3_decoder_layer_impl.cpp
