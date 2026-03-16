@@ -88,23 +88,21 @@ void NpuMistralDecoderLayerImpl::param_from_args(
   param.worldSize = parallel_args.world_size();
   param.numAttentionHeadsPerRank = args.n_heads() / param.worldSize;
 
-  int head_dim;
-  if (args.head_dim().has_value()) {
-    head_dim = args.head_dim().value();  // 从 config.json 读取
-    LOG(INFO) << "Using head_dim from config: " << head_dim;
+  int64_t config_head_dim = args.head_dim();  // 直接获取值
+  if (config_head_dim > 0) {
+    // 使用配置中的 head_dim
+    param.hiddenSizePerAttentionHead = config_head_dim;
+    LOG(INFO) << "Using head_dim from config: " << config_head_dim;
   } else {
-    head_dim = args.hidden_size() / args.n_heads();  // 向后兼容
-    LOG(INFO) << "head_dim not in config, computed: " << head_dim;
+    // 计算得到
+    param.hiddenSizePerAttentionHead = args.hidden_size() / args.n_heads();
+    LOG(INFO) << "head_dim not in config or invalid, computed: " 
+              << param.hiddenSizePerAttentionHead;
   }
-  param.hiddenSizePerAttentionHead = head_dim;
   
   // GQA设置 - Mistral特有
   int n_kv_heads = args.n_kv_heads().value_or(8);  // Mistral 7B默认8
-  param.numKeyValueHeadsPerRank = n_kv_heads / param.worldSize;
-  
-    // 验证维度
-  int expected_qkv_dim = (args.n_heads() + 2 * n_kv_heads) * head_dim;
-  LOG(INFO) << "Expected QKV dimension: " << expected_qkv_dim;
+  param.numKeyValueHeadsPerRank = n_kv_heads / param.worldSize;:wq!
   
   param.rank = parallel_args.rank();
   param.backend = "lccl";

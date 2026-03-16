@@ -204,30 +204,30 @@ class MistralModelImpl : public torch::nn::Module {
                        ? std::max(max_of_seq.item<int>(), max_seq_len_)
                        : 128;
     
-    int64_t batch_size = input_params.kv_seq_lens_vec.size();  // 从 input_params 获取
-    int64_t seq_len = tokens.size(0) / batch_size;  // 计算序列长度
-    
-    auto attn_mask = _create_4d_causal_attention_mask(
-        {batch_size, seq_len},
-        h.scalar_type(),
-        h.device()
-    );
-
+     torch::Tensor attn_mask;
     if (FLAGS_enable_chunked_prefill) {
-      int batch_size = input_params.q_seq_lens_vec.size();
-      std::vector<torch::Tensor> req_mask_vec;
-      req_mask_vec.reserve(batch_size);
+      int max_kv_seq = input_params.kv_max_seq_len;
+      int num_sequences = input_params.num_sequences;
+      if (num_sequences > 0) {
+        std::vector<torch::Tensor> req_mask_vec;
+        req_mask_vec.reserve(num_sequences);
 
-      for (int i = 0; i < batch_size; i++) {
-        int start =
-            input_params.kv_seq_lens_vec[i] - input_params.q_seq_lens_vec[i];
-        int end = input_params.kv_seq_lens_vec[i];
-
-        auto req_mask_slice = attn_mask.slice(0, start, end);
-        req_mask_vec.emplace_back(req_mask_slice);
+        for (int j = 0; j < num_sequences; j++) {
+          auto mask =
+              attn_mask_.gen_append_mask(input_params.q_seq_lens_vec[j],
+                                         input_params.kv_seq_lens_vec[j],
+                                         max_kv_seq,
+                                         cos_pos.dtype().toScalarType(),
+                                         cos_pos.device());
+          req_mask_vec.emplace_back(mask);
+        }
+        attn_mask = torch::cat(req_mask_vec, 0);
       }
-      attn_mask = torch::cat(req_mask_vec, 0);
+    } else if (input_params.batch_forward_type.is_prefill()) {
+      attn_mask = attn_mask_.get_attn_mask(
+          128, cos_pos.dtype().toScalarType(), cos_pos.device());
     }
+    
     for (size_t i = 0; i < layers_.size(); i++) {
       auto& layer = layers_[i];
       layer(h, cos_pos, sin_pos, attn_mask, kv_caches[i], input_params_new, i);
