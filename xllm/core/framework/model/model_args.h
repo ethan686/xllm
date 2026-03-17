@@ -395,7 +395,7 @@ struct ModelArgs {
   PROPERTY(float, mlp_ratio) = 3.0f;
   PROPERTY(int, timestep_guidance_channels) = 256;
   PROPERTY(double, eps) = 1e-6;
-  PROPERTY(int, patch_size) = 1; 
+  PROPERTY(int, patch_size) = 1;
 
   // t5 related args
   PROPERTY(int64_t, d_model) = 0;

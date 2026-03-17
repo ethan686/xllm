@@ -25,15 +25,16 @@ namespace xllm {
 
 class Flux2ImageProcessorImpl : public VAEImageProcessorImpl {
  public:
-  explicit Flux2ImageProcessorImpl(const ModelContext& context, int64_t vae_scale_factor = 16)
+  explicit Flux2ImageProcessorImpl(const ModelContext& context,
+                                   int64_t vae_scale_factor = 16)
       : VAEImageProcessorImpl(context, true, true, false, true, false, 32),
         vae_scale_factor_(vae_scale_factor),
         vae_latent_channels_(32) {}
 
   torch::Tensor check_image_input(const torch::Tensor& image,
-                                 int64_t max_aspect_ratio = 8,
-                                 int64_t min_side_length = 64,
-                                 int64_t max_area = 1024 * 1024) {
+                                  int64_t max_aspect_ratio = 8,
+                                  int64_t min_side_length = 64,
+                                  int64_t max_area = 1024 * 1024) {
     if (image.dim() != 3 && image.dim() != 4) {
       throw std::runtime_error(
           "Image must be 3D (C, H, W) or 4D (B, C, H, W), got dim: " +
@@ -44,46 +45,45 @@ class Flux2ImageProcessorImpl : public VAEImageProcessorImpl {
     int64_t width = image.size(-1);
 
     if (width < min_side_length || height < min_side_length) {
-      throw std::runtime_error(
-          "Image too small: " + std::to_string(width) + "x" +
-          std::to_string(height) + ". Both dimensions must be at least " +
-          std::to_string(min_side_length) + "px");
+      throw std::runtime_error("Image too small: " + std::to_string(width) +
+                               "x" + std::to_string(height) +
+                               ". Both dimensions must be at least " +
+                               std::to_string(min_side_length) + "px");
     }
 
-    float aspect_ratio =
-        std::max(static_cast<float>(width) / height,
-                 static_cast<float>(height) / width);
+    float aspect_ratio = std::max(static_cast<float>(width) / height,
+                                  static_cast<float>(height) / width);
     if (aspect_ratio > max_aspect_ratio) {
       throw std::runtime_error(
           "Aspect ratio too extreme: " + std::to_string(width) + "x" +
-          std::to_string(height) + " (ratio: " +
-          std::to_string(aspect_ratio) + ":1). Maximum allowed ratio is " +
-          std::to_string(max_aspect_ratio) + ":1");
+          std::to_string(height) + " (ratio: " + std::to_string(aspect_ratio) +
+          ":1). Maximum allowed ratio is " + std::to_string(max_aspect_ratio) +
+          ":1");
     }
 
     return image;
   }
 
   torch::Tensor resize_to_target_area(const torch::Tensor& image,
-                                   int64_t target_area = 1024 * 1024) {
+                                      int64_t target_area = 1024 * 1024) {
     int64_t image_width = image.size(-1);
     int64_t image_height = image.size(-2);
 
     float scale = std::sqrt(static_cast<float>(target_area) /
-                             static_cast<float>(image_width * image_height));
+                            static_cast<float>(image_width * image_height));
     int64_t width = static_cast<int64_t>(image_width * scale);
     int64_t height = static_cast<int64_t>(image_height * scale);
     return torch::nn::functional::interpolate(
-        image.unsqueeze(0),  // [1, 3, H, W]
-        torch::nn::functional::InterpolateFuncOptions()
-            .mode(torch::kBilinear)
-            .align_corners(false)
-            .size(std::vector<int64_t>{height, width}))
+               image.unsqueeze(0),  // [1, 3, H, W]
+               torch::nn::functional::InterpolateFuncOptions()
+                   .mode(torch::kBilinear)
+                   .align_corners(false)
+                   .size(std::vector<int64_t>{height, width}))
         .squeeze(0);
   }
 
   torch::Tensor resize_if_exceeds_area(const torch::Tensor& image,
-                                      int64_t target_area = 1024 * 1024) {
+                                       int64_t target_area = 1024 * 1024) {
     int64_t image_width = image.size(-1);
     int64_t image_height = image.size(-2);
     int64_t pixel_count = image_width * image_height;
@@ -96,8 +96,8 @@ class Flux2ImageProcessorImpl : public VAEImageProcessorImpl {
   }
 
   torch::Tensor resize_and_crop(const torch::Tensor& image,
-                              int64_t width,
-                              int64_t height) {
+                                int64_t width,
+                                int64_t height) {
     int64_t image_width = image.size(-1);
     int64_t image_height = image.size(-2);
 
@@ -109,8 +109,7 @@ class Flux2ImageProcessorImpl : public VAEImageProcessorImpl {
     return image.slice(-2, top, bottom).slice(-1, left, right);
   }
 
-  torch::Tensor concatenate_images(
-      const std::vector<torch::Tensor>& images) {
+  torch::Tensor concatenate_images(const std::vector<torch::Tensor>& images) {
     if (images.empty()) {
       throw std::runtime_error("Cannot concatenate empty image list");
     }

@@ -47,7 +47,6 @@ class Flux2VaeImpl : public torch::nn::Module {
     if (args_.use_post_quant_conv()) {
       post_quant_conv_->to(dtype);
     }
-    
 
     int64_t patch_size_prod = 1;
     for (auto ps : args_.ae_patch_size()) {
@@ -57,13 +56,11 @@ class Flux2VaeImpl : public torch::nn::Module {
 
     bn_ = register_module(
         "bn",
-        torch::nn::BatchNorm2d(
-            torch::nn::BatchNorm2dOptions(bn_num_features)
-                .eps(args_.batch_norm_eps())
-                .momentum(args_.batch_norm_momentum())
-                .affine(false)
-                .track_running_stats(true)
-    ));
+        torch::nn::BatchNorm2d(torch::nn::BatchNorm2dOptions(bn_num_features)
+                                   .eps(args_.batch_norm_eps())
+                                   .momentum(args_.batch_norm_momentum())
+                                   .affine(false)
+                                   .track_running_stats(true)));
     bn_->to(dtype);
   }
 
@@ -122,11 +119,10 @@ class Flux2VaeImpl : public torch::nn::Module {
                           "running_var",
                           bn_->running_var,
                           is_bn_running_var_);
-      weight::load_weight(state_dict->get_dict_with_prefix("bn."),
+      /*weight::load_weight(state_dict->get_dict_with_prefix("bn."),
                           "num_batches_tracked",
                           bn_->num_batches_tracked,
-                          is_bn_num_batches_tracked_);
-
+                          is_bn_num_batches_tracked_);*/
     }
     verify_loaded_weights("");
     LOG(INFO) << "VAE model loaded successfully.";
@@ -151,21 +147,16 @@ class Flux2VaeImpl : public torch::nn::Module {
         << "running_mean is not loaded for " << prefix + "bn.running_mean";
     CHECK(is_bn_running_var_)
         << "running_var is not loaded for " << prefix + "bn.running_var";
-    CHECK(is_bn_num_batches_tracked_)
-        << "num_batches_tracked is not loaded for " << prefix + "bn.num_batches_tracked";
-  }
-  
-  torch::Tensor get_bn_running_mean() const {
-    return bn_->running_mean;
+   /* CHECK(is_bn_num_batches_tracked_)
+        << "num_batches_tracked is not loaded for "
+        << prefix + "bn.num_batches_tracked";*/
   }
 
-  torch::Tensor get_bn_running_var() const {
-    return bn_->running_var;
-  }
+  torch::Tensor get_bn_running_mean() const { return bn_->running_mean; }
 
-  float get_batch_norm_eps() const {
-    return args_.batch_norm_eps();
-  }
+  torch::Tensor get_bn_running_var() const { return bn_->running_var; }
+
+  float get_batch_norm_eps() const { return args_.batch_norm_eps(); }
 
  private:
   VAEEncoder encoder_ = nullptr;
@@ -181,7 +172,7 @@ class Flux2VaeImpl : public torch::nn::Module {
   bool is_post_quant_conv_bias_ = false;
   bool is_bn_running_mean_ = false;
   bool is_bn_running_var_ = false;
-  bool is_bn_num_batches_tracked_ = false;
+  /*bool is_bn_num_batches_tracked_ = false;*/
   ModelArgs args_;
 };
 TORCH_MODULE(Flux2Vae);

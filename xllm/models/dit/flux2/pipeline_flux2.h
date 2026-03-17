@@ -14,16 +14,16 @@ limitations under the License.
 ==============================================================================*/
 
 #pragma once
+#include "image_processor.h"
 #include "pipeline_flux2_base.h"
 #include "transformer_flux2.h"
-#include "image_processor.h"
-//#include "models/dit/mistral3_encoder.h"
-#include "models/dit/flowmatch_euler_discrete_scheduler.h"
+// #include "models/dit/mistral3_encoder.h"
 #include "autoencoder_kl_flux2.h"
-//#include "core/framework/chat_template/jinja_chat_template.h"
-// pipeline_flux2 compatible with huggingface weights
-// ref to:
-// https://github.com/huggingface/diffusers/blob/main/src/diffusers/pipelines/flux2/pipeline_flux2.py
+#include "models/dit/flowmatch_euler_discrete_scheduler.h"
+// #include "core/framework/chat_template/jinja_chat_template.h"
+//  pipeline_flux2 compatible with huggingface weights
+//  ref to:
+//  https://github.com/huggingface/diffusers/blob/main/src/diffusers/pipelines/flux2/pipeline_flux2.py
 
 namespace xllm {
 
@@ -39,19 +39,22 @@ class Flux2PipelineImpl : public Flux2PipelineBaseImpl {
     tokenizer_max_length_ = 512;
     default_sample_size_ = 128;
     LOG(INFO) << "Initializing Flux2 pipeline...";
-    flux2_image_processor_ = Flux2ImageProcessor(context.get_model_context("vae"), vae_scale_factor_ * 2);
+    flux2_image_processor_ = Flux2ImageProcessor(
+        context.get_model_context("vae"), vae_scale_factor_ * 2);
     vae_ = Flux2Vae(context.get_model_context("vae"));
     pos_embed_ = register_module(
         "pos_embed",
         Flux2PosEmbed(context.get_model_args("transformer").rope_theta(),
-                     context.get_model_args("transformer").axes_dims_rope()));
+                      context.get_model_args("transformer").axes_dims_rope()));
     transformer_ = Flux2DiTModel(context.get_model_context("transformer"));
-    //mistral3_ = Mistral3EncoderModel(context.get_model_context("text_encoder"));
-    scheduler_ = FlowMatchEulerDiscreteScheduler(context.get_model_context("scheduler"));
+    // mistral3_ =
+    // Mistral3EncoderModel(context.get_model_context("text_encoder"));
+    scheduler_ =
+        FlowMatchEulerDiscreteScheduler(context.get_model_context("scheduler"));
     register_module("vae", vae_);
     register_module("flux2_image_processor", flux2_image_processor_);
     register_module("transformer", transformer_);
-    //register_module("mistral3", mistral3_);
+    // register_module("mistral3", mistral3_);
     register_module("scheduler", scheduler_);
   }
 
@@ -66,7 +69,7 @@ class Flux2PipelineImpl : public Flux2PipelineBaseImpl {
                              ? std::make_optional(input.prompt_embeds)
                              : std::nullopt;
     auto images = input.images.defined() ? std::make_optional(input.images)
-                                           : std::nullopt;
+                                         : std::nullopt;
 
     auto output = forward_impl(
         prompts,                                  // prompt
@@ -88,22 +91,24 @@ class Flux2PipelineImpl : public Flux2PipelineBaseImpl {
   }
 
   void load_model(std::unique_ptr<DiTModelLoader> loader) {
-    LOG(INFO) << "Flux2Pipeline loading model from" << loader->model_root_path();
+    LOG(INFO) << "Flux2Pipeline loading model from"
+              << loader->model_root_path();
     std::string model_path = loader->model_root_path();
     auto transformer_loader = loader->take_component_loader("transformer");
     auto vae_loader = loader->take_component_loader("vae");
-    //auto mistral3_loader = loader->take_component_loader("text_encoder");
-    //auto tokenizer_loader = loader->take_component_loader("tokenizer");
+    // auto mistral3_loader = loader->take_component_loader("text_encoder");
+    // auto tokenizer_loader = loader->take_component_loader("tokenizer");
     LOG(INFO)
         << "Flux2 model components loaded, start to load weights to sub models";
     transformer_->load_model(std::move(transformer_loader));
     transformer_->to(options_.device());
     vae_->load_model(std::move(vae_loader));
     vae_->to(options_.device());
-    //mistral3_->load_model(std::move(mistral3_loader));
-    //mistral3_->to(options_.device());
-    //tokenizer_ = tokenizer_loader->tokenizer();
-    //chat_template_ = std::make_unique<JinjaChatTemplate>(tokenizer_loader->tokenizer_args());
+    // mistral3_->load_model(std::move(mistral3_loader));
+    // mistral3_->to(options_.device());
+    // tokenizer_ = tokenizer_loader->tokenizer();
+    // chat_template_ =
+    // std::make_unique<JinjaChatTemplate>(tokenizer_loader->tokenizer_args());
   }
 
  private:
@@ -116,10 +121,13 @@ class Flux2PipelineImpl : public Flux2PipelineBaseImpl {
       std::optional<torch::Tensor> latents = std::nullopt) {
     int64_t adjusted_height = 2 * (height / (vae_scale_factor_ * 2));
     int64_t adjusted_width = 2 * (width / (vae_scale_factor_ * 2));
-    std::vector<int64_t> shape = {
-        batch_size, num_channels_latents * 4, adjusted_height / 2, adjusted_width / 2};
+    std::vector<int64_t> shape = {batch_size,
+                                  num_channels_latents * 4,
+                                  adjusted_height / 2,
+                                  adjusted_width / 2};
     if (latents.has_value()) {
-      torch::Tensor latent_image_ids = prepare_latent_image_ids(latents.value());
+      torch::Tensor latent_image_ids =
+          prepare_latent_image_ids(latents.value());
       return {latents.value(), latent_image_ids};
     }
     torch::Tensor latents_tensor = randn_tensor(shape, seed, options_);
@@ -136,8 +144,13 @@ class Flux2PipelineImpl : public Flux2PipelineBaseImpl {
     for (const auto& image : images) {
       auto image_latent = vae_->encode(image, seed);
       auto patched_latent = patchify_latents(image_latent);
-      auto latents_bn_mean = vae_->get_bn_running_mean().view({1, -1, 1, 1}).to(image_latent.device(), image_latent.dtype());
-      auto latents_bn_std = torch::sqrt(vae_->get_bn_running_var().view({1, -1, 1, 1}) + vae_->get_batch_norm_eps());
+      auto latents_bn_mean =
+          vae_->get_bn_running_mean()
+              .view({1, -1, 1, 1})
+              .to(image_latent.device(), image_latent.dtype());
+      auto latents_bn_std =
+          torch::sqrt(vae_->get_bn_running_var().view({1, -1, 1, 1}) +
+                      vae_->get_batch_norm_eps());
       image_latent = (patched_latent - latents_bn_mean) / latents_bn_std;
       image_latents.push_back(image_latent);
     }
@@ -150,7 +163,8 @@ class Flux2PipelineImpl : public Flux2PipelineBaseImpl {
     return {repeated_latents, repeated_ids};
   }
 
-  torch::Tensor pack_latents_for_images(const std::vector<torch::Tensor>& image_latents) {
+  torch::Tensor pack_latents_for_images(
+      const std::vector<torch::Tensor>& image_latents) {
     std::vector<torch::Tensor> packed_latents;
     for (const auto& latent : image_latents) {
       auto packed = pack_latents(latent);
@@ -184,12 +198,33 @@ class Flux2PipelineImpl : public Flux2PipelineBaseImpl {
     int64_t total_batch_size = batch_size * num_images_per_prompt;
     // encode prompt
 
-    torch::Tensor encoded_prompt_embeds = torch::randn(
+    /* torch::Tensor encoded_prompt_embeds = torch::randn(
         at::IntArrayRef({total_batch_size, max_sequence_length, 6444}),
-        torch::dtype(torch::kFloat32)
-    );
+        torch::dtype(torch::kFloat32));
+    */
+    /* torch::Tensor text_ids =
+        torch::zeros({total_batch_size, max_sequence_length}, torch::kInt64);
+    */
+    torch::Tensor encoded_prompt_embeds;
+    torch::Tensor text_ids;
+   
+    device_ = torch::Device("npu:0"); 
+    auto encoded_prompt_embeds_load = StateDictFromSafeTensor::load("/export/home/weinan5/08_dump_save_tensor_data/" "prompt_embeds_save.safetensors");
+    auto encoded_prompt_embeds_shape = torch::ones({1,512, 15360}, torch::kBFloat16);
+    bool is_conv_out_weight_loaded_ = false;
+    weight::load_weight(*encoded_prompt_embeds_load, "prompt_embeds_save", encoded_prompt_embeds_shape, is_conv_out_weight_loaded_);
+    encoded_prompt_embeds= encoded_prompt_embeds_shape.to(device_).to(torch::kBFloat16);
+    
+    //LOG(INFO) << "encoded_prompt_embeds_shape.to(device_)" << device_;    
 
-    torch::Tensor text_ids = torch::zeros({total_batch_size, max_sequence_length}, torch::kInt64);
+    auto text_ids_load = StateDictFromSafeTensor::load("/export/home/weinan5/08_dump_save_tensor_data/" "text_ids_save.safetensors");
+    auto text_ids_shape = torch::ones({1,512, 4}, torch::kLong);
+    bool is_text_ids_loaded_ = false;
+    weight::load_weight(*text_ids_load, "text_ids_save", text_ids_shape, is_text_ids_loaded_);
+    text_ids= text_ids_shape.to(device_).to(torch::kLong);
+    LOG(INFO) << "encoded_prompt_embeds.size" << encoded_prompt_embeds.sizes();
+    LOG(INFO) << "text_ids.size;" << text_ids.sizes();
+
     /* auto [encoded_prompt_embeds, text_ids] =
         encode_prompt(prompt,
                   prompt_embeds,
@@ -198,6 +233,8 @@ class Flux2PipelineImpl : public Flux2PipelineBaseImpl {
                   hidden_states_layers,
                   system_message);
     */
+
+    LOG(INFO) << "-------------------// process images" << std::endl;
     // process images
     std::vector<torch::Tensor> condition_images_list;
     if (images.has_value()) {
@@ -205,23 +242,36 @@ class Flux2PipelineImpl : public Flux2PipelineBaseImpl {
       if (input_images.dim() == 3) {
         input_images = input_images.unsqueeze(0);
       }
+      std::cout << "=== Image Processing Debug ===" << std::endl;
+      std::cout << "input_images shape: " << input_images.sizes() << std::endl;
+      std::cout << "vae_scale_factor_: " << vae_scale_factor_ << std::endl;
+      std::cout << "multiple_of: " << vae_scale_factor_ * 2 << std::endl;
+
       for (int64_t i = 0; i < input_images.size(0); ++i) {
         auto img = input_images[i];
         flux2_image_processor_->check_image_input(img);
         int64_t image_width = img.size(-1);
         int64_t image_height = img.size(-2);
+        std::cout << "Image " << i << " original size: " << image_height << "x" << image_width << std::endl;
+
         if (image_width * image_height > 1024 * 1024) {
+          std::cout << "  Resizing image (area too large: " << image_width * image_height << ")" << std::endl;
           img = flux2_image_processor_->resize_to_target_area(img, 1024 * 1024);
           image_width = img.size(-1);
           image_height = img.size(-2);
+          std::cout << "  After resize: " << image_height << "x" << image_width << std::endl;
         }
         int64_t multiple_of = vae_scale_factor_ * 2;
         image_width = (image_width / multiple_of) * multiple_of;
         image_height = (image_height / multiple_of) * multiple_of;
-        img = flux2_image_processor_->preprocess(img, image_height, image_width);
+        std::cout << "  Adjusting to multiple of " << multiple_of << ": " 
+              << image_height << "x" << image_width << std::endl;
+        img =
+            flux2_image_processor_->preprocess(img, image_height, image_width);
         condition_images_list.push_back(img);
       }
     }
+    LOG(INFO) << "-------------------// process images" << std::endl;
     // prepare latent
     int64_t num_channels_latents = transformer_->in_channels() / 4;
     auto [prepared_latents, latent_image_ids] =
@@ -231,14 +281,19 @@ class Flux2PipelineImpl : public Flux2PipelineBaseImpl {
                         width,
                         seed.has_value() ? seed.value() : 42,
                         latents);
-
+    LOG(INFO) << "-------------latent_image_ids.size:" << latent_image_ids.sizes() << std::endl;
+    LOG(INFO) << "-------------prepared_latents.size:" << prepared_latents.sizes() << std::endl;
     // prepare image latents if condition_images_list is not empty
     torch::Tensor image_latents;
     torch::Tensor image_latent_ids;
     if (!condition_images_list.empty()) {
-      std::tie(image_latents, image_latent_ids) = prepare_image_latents(condition_images_list, total_batch_size, seed.has_value() ? seed.value() : 42);
+      std::tie(image_latents, image_latent_ids) =
+          prepare_image_latents(condition_images_list,
+                                total_batch_size,
+                                seed.has_value() ? seed.value() : 42);
     }
-
+    
+    LOG(INFO) << "-------------------// prepare latent" << std::endl;
     // prepare timestep
     std::vector<float> new_sigmas;
     for (int64_t i = 0; i < num_inference_steps; ++i) {
@@ -251,11 +306,11 @@ class Flux2PipelineImpl : public Flux2PipelineBaseImpl {
     float mu = compute_empirical_mu(image_seq_len, num_inference_steps);
     auto [timesteps, num_inference_steps_actual] = flux2_retrieve_timesteps(
         scheduler_, num_inference_steps, options_.device(), new_sigmas, mu);
-    //int64_t num_warmup_steps =
-    //    std::max(static_cast<int64_t>(timesteps.numel()) -
-    //                 num_inference_steps_actual * scheduler_->order(),
-    //             static_cast<int64_t>(0LL));
-    // prepare guidance
+    // int64_t num_warmup_steps =
+    //     std::max(static_cast<int64_t>(timesteps.numel()) -
+    //                  num_inference_steps_actual * scheduler_->order(),
+    //              static_cast<int64_t>(0LL));
+    //  prepare guidance
     torch::Tensor guidance;
     torch::TensorOptions options =
         torch::dtype(torch::kFloat32).device(options_.device());
@@ -263,14 +318,19 @@ class Flux2PipelineImpl : public Flux2PipelineBaseImpl {
     guidance = torch::full(at::IntArrayRef({1}), guidance_scale, options);
     guidance = guidance.expand({prepared_latents.size(0)});
 
+    LOG(INFO) << "-------------------// prepare timestep" << std::endl;
     // image rotary positional embeddings outplace computation
+    std::cout << "---------------------text_ids shape: " << text_ids.sizes() << std::endl;
+    std::cout << "---------------------latent_image_ids shape: " << latent_image_ids.sizes() << std::endl;
     auto [rot_emb1, rot_emb2] =
         pos_embed_->forward_cache(text_ids,
                                   latent_image_ids,
                                   height / (vae_scale_factor_ * 2),
                                   width / (vae_scale_factor_ * 2));
+    LOG(INFO) << "-------------------// pos_embed_->forward_cache" << std::endl; 
     torch::Tensor image_rotary_emb =
         torch::stack({rot_emb1, rot_emb2}, 0).to(options_.dtype());
+    LOG(INFO) << "-------------------// image_rotary_emb" << std::endl;
     // denosing loop
     scheduler_->set_begin_index(0);
     torch::Tensor timestep =
@@ -283,24 +343,31 @@ class Flux2PipelineImpl : public Flux2PipelineBaseImpl {
 
       torch::Tensor latent_model_input = prepared_latents.to(options_.dtype());
       torch::Tensor latent_image_ids_input = latent_image_ids;
+      LOG(INFO) << "-------------------// Dit image_latents_if_1111111" << std::endl;
       if (image_latents.defined()) {
-        latent_model_input = torch::cat({prepared_latents, image_latents}, 1).to(options_.dtype());
-        latent_image_ids_input = torch::cat({latent_image_ids, image_latent_ids}, 1);
+        latent_model_input = torch::cat({prepared_latents, image_latents}, 1)
+                                 .to(options_.dtype());
+        latent_image_ids_input =
+            torch::cat({latent_image_ids, image_latent_ids}, 1);
         auto [rot_emb1_img, rot_emb2_img] =
             pos_embed_->forward_cache(text_ids,
                                       latent_image_ids_input,
                                       height / (vae_scale_factor_ * 2),
                                       width / (vae_scale_factor_ * 2));
-        image_rotary_emb = torch::stack({rot_emb1_img, rot_emb2_img}, 0).to(options_.dtype());
+        image_rotary_emb =
+            torch::stack({rot_emb1_img, rot_emb2_img}, 0).to(options_.dtype());
       }
+      LOG(INFO) << "-------------------// Dit forward_pre_2222222" << std::endl;
       torch::Tensor noise_pred = transformer_->forward(latent_model_input,
                                                        encoded_prompt_embeds,
                                                        timestep,
                                                        guidance,
                                                        image_rotary_emb);
+      LOG(INFO) << "-------------------// Dit forward_after_3333333" << std::endl;
       if (image_latents.defined()) {
         noise_pred = noise_pred.narrow(1, 0, prepared_latents.size(1));
       }
+      LOG(INFO) << "-------------------// dit_output_noise_pred_4444" << std::endl; 
       auto prev_latents = scheduler_->step(noise_pred, t, prepared_latents);
       prepared_latents = prev_latents.detach();
       std::vector<torch::Tensor> tensors = {prepared_latents, noise_pred};
@@ -315,12 +382,21 @@ class Flux2PipelineImpl : public Flux2PipelineBaseImpl {
     torch::Tensor image;
     torch::Tensor unpacked_latents =
         unpack_latents_with_ids(prepared_latents, latent_image_ids);
-    auto latents_bn_mean = vae_->get_bn_running_mean().view({1, -1, 1, 1}).to(unpacked_latents.device(), unpacked_latents.dtype());
-    auto latents_bn_std = torch::sqrt(vae_->get_bn_running_var().view({1, -1, 1, 1}) + vae_->get_batch_norm_eps()).to(unpacked_latents.device(), unpacked_latents.dtype());
+    auto latents_bn_mean =
+        vae_->get_bn_running_mean()
+            .view({1, -1, 1, 1})
+            .to(unpacked_latents.device(), unpacked_latents.dtype());
+    auto latents_bn_std =
+        torch::sqrt(vae_->get_bn_running_var().view({1, -1, 1, 1}) +
+                    vae_->get_batch_norm_eps())
+            .to(unpacked_latents.device(), unpacked_latents.dtype());
+    LOG(INFO) << "-------------------// final_unpacked_latents" << std::endl;
     unpacked_latents = unpacked_latents * latents_bn_std + latents_bn_mean;
     unpacked_latents = unpatchify_latents(unpacked_latents);
     image = vae_->decode(unpacked_latents);
+    LOG(INFO) << "-------------------// final_vae_" << std::endl;
     image = flux2_image_processor_->postprocess(image);
+    LOG(INFO) << "-------------------// final_image_result" << std::endl;
     return image;
   }
 
@@ -336,7 +412,7 @@ class Flux2PipelineImpl : public Flux2PipelineBaseImpl {
   int default_sample_size_;
   int vae_scale_factor_;
   Flux2PosEmbed pos_embed_{nullptr};
-  //std::unique_ptr<JinjaChatTemplate> chat_template_;
+  // std::unique_ptr<JinjaChatTemplate> chat_template_;
 };
 TORCH_MODULE(Flux2Pipeline);
 

@@ -23,7 +23,7 @@ limitations under the License.
 #include <vector>
 
 #include "autoencoder_kl_flux2.h"
-//#include "core/framework/chat_template/jinja_chat_template.h"
+// #include "core/framework/chat_template/jinja_chat_template.h"
 #include "core/framework/dit_model_loader.h"
 #include "core/framework/model_context.h"
 #include "core/framework/request/dit_request_state.h"
@@ -31,19 +31,21 @@ limitations under the License.
 #include "core/framework/state_dict/utils.h"
 #include "models/dit/flowmatch_euler_discrete_scheduler.h"
 #include "models/model_registry.h"
-//#include "mistral3_encoder.h"
+// #include "mistral3_encoder.h"
 #include "transformer_flux2.h"
 
 namespace xllm {
 
 inline std::string SYSTEM_MESSAGE =
     "You are an AI that reasons about image descriptions. You give structured "
-    "responses focusing on object relationships, object attribution and actions "
+    "responses focusing on object relationships, object attribution and "
+    "actions "
     "without speculation.";
 
 inline std::string SYSTEM_MESSAGE_UPSAMPLING_T2I =
     "You are an expert prompt engineer for FLUX.2 by Black Forest Labs. "
-    "Rewrite user prompts to be more descriptive while strictly preserving their "
+    "Rewrite user prompts to be more descriptive while strictly preserving "
+    "their "
     "core subject and intent.\n"
     "Guidelines:\n"
     "1. Structure: Keep structured inputs structured (enhance within fields). "
@@ -52,22 +54,27 @@ inline std::string SYSTEM_MESSAGE_UPSAMPLING_T2I =
     "materials, lighting (quality, direction, color), shadows, spatial "
     "relationships, and environmental context.\n"
     "3. Text in Images: Put ALL text in quotation marks, matching the "
-    "prompt's language. Always provide explicit quoted text for objects that would "
+    "prompt's language. Always provide explicit quoted text for objects that "
+    "would "
     "contain text in reality (signs, labels, screens, etc.) - without it, "
     "the model generates gibberish.\n"
     "Output only the revised prompt and nothing else.";
 
 inline std::string SYSTEM_MESSAGE_UPSAMPLING_I2I =
     "You are FLUX.2 by Black Forest Labs, an image-editing expert. You "
-    "convert editing requests into one concise instruction (50-80 words, ~30 for "
+    "convert editing requests into one concise instruction (50-80 words, ~30 "
+    "for "
     "brief requests).\n"
     "Rules:\n"
     "- Single instruction only, no commentary\n"
-    "- Use clear, analytical language (avoid \"whimsical,\" \"cascading,\" etc.)\n"
-    "- Specify what changes AND what stays the same (face, lighting, composition)\n"
+    "- Use clear, analytical language (avoid \"whimsical,\" \"cascading,\" "
+    "etc.)\n"
+    "- Specify what changes AND what stays the same (face, lighting, "
+    "composition)\n"
     "- Reference actual image elements\n"
     "- Turn negatives into positives (\"don't change X\" → \"keep X\")\n"
-    "- Make abstractions concrete (\"futuristic\" → \"glowing cyan neon, metallic "
+    "- Make abstractions concrete (\"futuristic\" → \"glowing cyan neon, "
+    "metallic "
     "panels\")\n"
     "- Keep content PG-13\n"
     "Output only the final instruction in plain text and nothing else.";
@@ -75,7 +82,8 @@ inline std::string SYSTEM_MESSAGE_UPSAMPLING_I2I =
 inline std::vector<std::vector<std::unordered_map<std::string, std::string>>>
 format_input(const std::vector<std::string>& prompts,
              const std::string& system_message = SYSTEM_MESSAGE,
-             const std::vector<std::vector<torch::Tensor>>& images = std::vector<std::vector<torch::Tensor>>()) {
+             const std::vector<std::vector<torch::Tensor>>& images =
+                 std::vector<std::vector<torch::Tensor>>()) {
   std::vector<std::vector<std::unordered_map<std::string, std::string>>>
       messages_batch;
   messages_batch.reserve(prompts.size());
@@ -83,15 +91,14 @@ format_input(const std::vector<std::string>& prompts,
   for (const auto& prompt : prompts) {
     std::vector<std::unordered_map<std::string, std::string>> messages;
 
-    messages.push_back({
-        {"role", "system"},
-        {"content", "[{\"type\": \"text\", \"text\": \"" + system_message + "\"}]"}
-    });
+    messages.push_back(
+        {{"role", "system"},
+         {"content",
+          "[{\"type\": \"text\", \"text\": \"" + system_message + "\"}]"}});
 
-    messages.push_back({
-        {"role", "user"},
-        {"content", "[{\"type\": \"text\", \"text\": \"" + prompt + "\"}]"}
-    });
+    messages.push_back(
+        {{"role", "user"},
+         {"content", "[{\"type\": \"text\", \"text\": \"" + prompt + "\"}]"}});
 
     messages_batch.push_back(messages);
   }
@@ -161,11 +168,13 @@ class Flux2PosEmbedImpl : public torch::nn::Module {
 
     if (height != cached_image_height_ || width != cached_image_width_ ||
         seq_len != max_seq_len_) {
-      torch::Tensor ids = torch::cat({txt_ids, img_ids}, 0);
+      torch::Tensor ids = torch::cat({txt_ids, img_ids},1);//已修�~T�
+      LOG(INFO) << "----------concat.ids" << ids.sizes();
       cached_image_height_ = height;
       cached_image_width_ = width;
       max_seq_len_ = seq_len;
       auto [cos, sin] = forward(ids);
+      LOG(INFO) << "----------C++.forward.ids" << ids.sizes(); 
       freqs_cos_cache_ = std::move(cos);
       freqs_sin_cache_ = std::move(sin);
     }
@@ -178,23 +187,22 @@ class Flux2PosEmbedImpl : public torch::nn::Module {
     auto pos = ids.to(torch::kFloat32);
     torch::Dtype freqs_dtype = torch::kFloat64;
     for (int64_t i = 0; i < n_axes; ++i) {
-      auto pos_slice = pos.select(-1, i);
-      auto result = get_1d_rotary_pos_embed(axes_dim_[i],
-                                            pos_slice,
-                                            theta_,
-                                            true,
-                                            1,
-                                            1,
-                                            true,
-                                            freqs_dtype);
+      LOG(INFO) << "----------before---pos.select()" << std::endl; 
+      auto pos_slice = pos.select(-1, i).squeeze(0);//已修改
+      LOG(INFO) << "----------after---pos.select(-1, i)" << std::endl; 
+      auto result = get_1d_rotary_pos_embed(
+          axes_dim_[i], pos_slice, theta_, true, 1, 1, true, freqs_dtype);
+      LOG(INFO) << "----------get_1d_rotary_pos_embed-----" << std::endl;
       auto cos = result[0];
       auto sin = result[1];
       cos_out.push_back(cos);
       sin_out.push_back(sin);
+      LOG(INFO) << "----------for_loop_end" << std::endl;
     }
 
     auto freqs_cos = torch::cat(cos_out, -1);
     auto freqs_sin = torch::cat(sin_out, -1);
+    LOG(INFO) << "----------end_forward" << std::endl;
     return {freqs_cos, freqs_sin};
   }
 
@@ -211,11 +219,12 @@ TORCH_MODULE(Flux2PosEmbed);
 
 class Flux2PipelineBaseImpl : public torch::nn::Module {
  protected:
-  torch::Tensor get_mistral3_prompt_embeds(std::vector<std::string>& prompt,
-                                         int64_t num_images_per_prompt = 1,
-                                         int64_t max_sequence_length = 512,
-                                         const std::vector<int64_t>& hidden_states_layers = {10, 20, 30},
-                                         const std::string& system_message = SYSTEM_MESSAGE) {
+  torch::Tensor get_mistral3_prompt_embeds(
+      std::vector<std::string>& prompt,
+      int64_t num_images_per_prompt = 1,
+      int64_t max_sequence_length = 512,
+      const std::vector<int64_t>& hidden_states_layers = {10, 20, 30},
+      const std::string& system_message = SYSTEM_MESSAGE) {
     int64_t batch_size = prompt.size();
 
     auto messages_batch = format_input(prompt, system_message);
@@ -249,15 +258,17 @@ class Flux2PipelineBaseImpl : public torch::nn::Module {
             .view({batch_size, max_sequence_length})
             .to(options_.device());
 
-    //auto hidden_states_output = mistral3_->forward_with_hidden_states(input_ids, hidden_states_layers);
-    auto hidden_states_output = torch::empty({1, 512, 256, 768}, torch::kFloat32);
+    // auto hidden_states_output =
+    // mistral3_->forward_with_hidden_states(input_ids, hidden_states_layers);
+    auto hidden_states_output =
+        torch::empty({1, 512, 256, 768}, torch::kFloat32);
     int64_t num_channels = hidden_states_output.size(1);
     int64_t seq_len = hidden_states_output.size(2);
     int64_t hidden_dim = hidden_states_output.size(3);
 
     auto prompt_embeds =
-        hidden_states_output.permute({0, 2, 1, 3}).reshape(
-            {batch_size, seq_len, num_channels * hidden_dim});
+        hidden_states_output.permute({0, 2, 1, 3})
+            .reshape({batch_size, seq_len, num_channels * hidden_dim});
 
     prompt_embeds = prompt_embeds.repeat({1, num_images_per_prompt, 1});
     prompt_embeds =
@@ -282,7 +293,8 @@ class Flux2PipelineBaseImpl : public torch::nn::Module {
       auto coords = torch::stack({grid[0].flatten(),
                                   grid[1].flatten(),
                                   grid[2].flatten(),
-                                  grid[3].flatten()}, -1);
+                                  grid[3].flatten()},
+                                 -1);
       out_ids.push_back(coords);
     }
 
@@ -305,9 +317,10 @@ class Flux2PipelineBaseImpl : public torch::nn::Module {
       prompt_list = {""};
     }
     if (!prompt_embeds.has_value()) {
-      prompt_embeds = get_mistral3_prompt_embeds(
-          prompt_list, num_images_per_prompt, max_sequence_length,
-          hidden_states_layers);
+      prompt_embeds = get_mistral3_prompt_embeds(prompt_list,
+                                                 num_images_per_prompt,
+                                                 max_sequence_length,
+                                                 hidden_states_layers);
     }
     torch::Tensor text_ids = prepare_text_ids(prompt_embeds.value());
 
@@ -315,7 +328,6 @@ class Flux2PipelineBaseImpl : public torch::nn::Module {
   }
 
   torch::Tensor prepare_latent_image_ids(const torch::Tensor& latents) {
-
     int64_t batch_size = latents.size(0);
     int64_t num_channels = latents.size(1);
     int64_t height = latents.size(2);
@@ -330,7 +342,8 @@ class Flux2PipelineBaseImpl : public torch::nn::Module {
     auto coords = torch::stack({grid[0].flatten(),
                                 grid[1].flatten(),
                                 grid[2].flatten(),
-                                grid[3].flatten()}, -1);
+                                grid[3].flatten()},
+                               -1);
 
     auto latent_image_ids = coords.unsqueeze(0).expand({batch_size, -1, -1});
     return latent_image_ids;
@@ -342,7 +355,8 @@ class Flux2PipelineBaseImpl : public torch::nn::Module {
     int64_t height = latents.size(2);
     int64_t width = latents.size(3);
 
-    torch::Tensor latents_packed = latents.reshape({batch_size, num_channels, height * width});
+    torch::Tensor latents_packed =
+        latents.reshape({batch_size, num_channels, height * width});
     latents_packed = latents_packed.permute({0, 2, 1});
 
     return latents_packed;
@@ -354,9 +368,11 @@ class Flux2PipelineBaseImpl : public torch::nn::Module {
     int64_t height = latents.size(2);
     int64_t width = latents.size(3);
 
-    torch::Tensor latents_patched = latents.view({batch_size, num_channels_latents, height / 2, 2, width / 2, 2});
+    torch::Tensor latents_patched = latents.view(
+        {batch_size, num_channels_latents, height / 2, 2, width / 2, 2});
     latents_patched = latents_patched.permute({0, 1, 3, 5, 2, 4});
-    latents_patched = latents_patched.reshape({batch_size, num_channels_latents * 4, height / 2, width / 2});
+    latents_patched = latents_patched.reshape(
+        {batch_size, num_channels_latents * 4, height / 2, width / 2});
 
     return latents_patched;
   }
@@ -367,9 +383,11 @@ class Flux2PipelineBaseImpl : public torch::nn::Module {
     int64_t height = latents.size(2);
     int64_t width = latents.size(3);
 
-    torch::Tensor latents_unpatched = latents.reshape({batch_size, num_channels_latents / (2 * 2), 2, 2, height, width});
+    torch::Tensor latents_unpatched = latents.reshape(
+        {batch_size, num_channels_latents / (2 * 2), 2, 2, height, width});
     latents_unpatched = latents_unpatched.permute({0, 1, 4, 2, 5, 3});
-    latents_unpatched = latents_unpatched.reshape({batch_size, num_channels_latents / (2 * 2), height * 2, width * 2});
+    latents_unpatched = latents_unpatched.reshape(
+        {batch_size, num_channels_latents / (2 * 2), height * 2, width * 2});
 
     return latents_unpatched;
   }
@@ -393,7 +411,8 @@ class Flux2PipelineBaseImpl : public torch::nn::Module {
     return latents_unpacked;
   }
 
-  torch::Tensor unpack_latents_with_ids(const torch::Tensor& latents, const torch::Tensor& latent_ids) {
+  torch::Tensor unpack_latents_with_ids(const torch::Tensor& latents,
+                                        const torch::Tensor& latent_ids) {
     int64_t batch_size = latents.size(0);
     int64_t seq_len = latents.size(1);
     int64_t channels = latents.size(2);
@@ -421,8 +440,9 @@ class Flux2PipelineBaseImpl : public torch::nn::Module {
     return torch::stack(x_list, 0);
   }
 
-  torch::Tensor _prepare_image_ids(const std::vector<torch::Tensor>& image_latents,
-                                   int64_t scale = 10) {
+  torch::Tensor _prepare_image_ids(
+      const std::vector<torch::Tensor>& image_latents,
+      int64_t scale = 10) {
     if (image_latents.empty()) {
       throw std::invalid_argument("image_latents list cannot be empty!");
     }
@@ -439,8 +459,7 @@ class Flux2PipelineBaseImpl : public torch::nn::Module {
       if (x.dim() != 3) {
         throw std::invalid_argument(
             "Each image latent must be 3D (C, H, W) or 4D (1, C, H, W), got " +
-            std::to_string(x.dim()) + "D tensor!"
-        );
+            std::to_string(x.dim()) + "D tensor!");
       }
 
       int64_t height = x.size(1);
@@ -465,13 +484,12 @@ class Flux2PipelineBaseImpl : public torch::nn::Module {
     return combined_coords;
   }
 
-
  protected:
-  //Mistral3EncoderModel mistral3_{nullptr};
+  // Mistral3EncoderModel mistral3_{nullptr};
   torch::Device device_ = torch::kCPU;
   torch::ScalarType dtype_;
   std::unique_ptr<Tokenizer> tokenizer_;
-  //std::unique_ptr<JinjaChatTemplate> chat_template_;
+  // std::unique_ptr<JinjaChatTemplate> chat_template_;
   torch::TensorOptions options_;
   int tokenizer_max_length_;
   int vae_scale_factor_;
