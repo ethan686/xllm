@@ -32,6 +32,7 @@ cc_library(
     npu_mistral_decoder_layer_impl.h
     npu_qwen2_decoder_layer_impl.h
     npu_qwen3_decoder_layer_impl.h
+    npu_onerec_block_layer_impl.h
     npu_eagle3_decoder_layer_impl.h
     npu_glm4_decoder_layer_impl.h
     npu_rms_norm_impl.h
@@ -40,6 +41,7 @@ cc_library(
     loader/qwen3_decoder_loader.h
     loader/qwen2_decoder_loader.h
     loader/qwen3_moe_decoder_loader.h
+    loader/eagle3_decoder_loader.h
     loader/word_embedding_loader.h
     loader/lm_head_loader.h
     loader/column_parallel_linear_loader.h
@@ -86,6 +88,7 @@ cc_library(
     npu_mistral_decoder_layer_impl.cpp
     npu_qwen2_decoder_layer_impl.cpp
     npu_qwen3_decoder_layer_impl.cpp
+    npu_onerec_block_layer_impl.cpp
     npu_eagle3_decoder_layer_impl.cpp
     npu_glm4_decoder_layer_impl.cpp
     npu_rms_norm_impl.cpp
@@ -94,6 +97,7 @@ cc_library(
     loader/qwen3_decoder_loader.cpp
     loader/qwen2_decoder_loader.cpp
     loader/qwen3_moe_decoder_loader.cpp
+    loader/eagle3_decoder_loader.cpp
     loader/word_embedding_loader.cpp
     loader/lm_head_loader.cpp
     loader/column_parallel_linear_loader.cpp
