@@ -94,6 +94,8 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
       attn_metadata.plan_info->layer_id = i;
 #endif
       auto& layer = layers_[i];
+      prepare_decoder_layer_for_forward(i, layer, attn_metadata);
+
       hidden_states = layer(hidden_states,
                             residual,
                             positions,
@@ -125,11 +127,29 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
     norm_->load_state_dict(state_dict.get_dict_with_prefix("norm."));
   }
 
+  void verify_loaded_weights() const {
+    for (const auto& layer : layers_) {
+      layer->verify_loaded_weights();
+    }
+  }
+
   layer::WordEmbedding get_word_embedding() { return embed_tokens_; }
 
   void set_word_embedding(layer::WordEmbedding& word_embedding) {
     embed_tokens_ = word_embedding;
   }
+
+ protected:
+  virtual void prepare_decoder_layer_for_forward(
+      size_t /*layer_id*/,
+      layer::DeepseekV2DecoderLayer& /*layer*/,
+      const layer::AttentionMetadata& /*attn_metadata*/) {}
+
+  layer::WordEmbedding& embed_mod() { return embed_tokens_; }
+
+  std::vector<layer::DeepseekV2DecoderLayer>& layers_ref() { return layers_; }
+
+  layer::RMSNorm& norm_mod() { return norm_; }
 
  private:
   torch::nn::ModuleList blocks_{nullptr};
@@ -157,6 +177,21 @@ class DeepseekV2ForCausalLMImpl
     CHECK(!FLAGS_enable_chunked_prefill)
         << "deepseek_v2 have not supported "
            "enable_chunked_prefill yet. Please disable it.";
+  }
+
+  void load_model(
+      std::unique_ptr<ModelLoader> loader,
+      std::string prefix = "model." /*llm model weight prefix*/) override {
+    for (const auto& state_dict : loader->get_state_dicts()) {
+      model_->load_state_dict(state_dict->get_dict_with_prefix(prefix));
+      if (tie_word_embeddings) {
+        lm_head_->load_state_dict(
+            state_dict->get_dict_with_prefix(prefix + "embed_tokens."));
+      } else {
+        lm_head_->load_state_dict(state_dict->get_dict_with_prefix("lm_head."));
+      }
+    }
+    model_->verify_loaded_weights();
   }
 };
 TORCH_MODULE(DeepseekV2ForCausalLM);

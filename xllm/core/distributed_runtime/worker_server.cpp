@@ -69,6 +69,7 @@ void WorkerServer::create_server(
     WorkerType worker_type,
     std::unique_ptr<ForwardSharedMemoryManager> input_shm_manager,
     std::unique_ptr<ForwardSharedMemoryManager> output_shm_manager) {
+  FLAGS_enable_prefill_sp = options.enable_prefill_sp();
   Device device(d);
   device.set_device();
   LOG(INFO) << "Create worker server with device: " << device.index();
@@ -156,6 +157,9 @@ void WorkerServer::create_spawn_server(int local_rank,
   const char* output_shm_size_ptr = output_shm_size_str.c_str();
   auto is_local_str = std::to_string(options.is_local());
   const char* is_local_ptr = is_local_str.c_str();
+  auto enable_prefill_sp_str = std::to_string(options.enable_prefill_sp());
+  const char* enable_prefill_sp_ptr = enable_prefill_sp_str.c_str();
+  const char* communication_backend_ptr = FLAGS_communication_backend.c_str();
   const char* worker_type_ptr = worker_type.to_string();
   std::string spawn_worker_bin_path =
       options.spawn_worker_path() + "/spawn_worker";
@@ -170,10 +174,12 @@ void WorkerServer::create_spawn_server(int local_rank,
                         block_size_ptr,
                         enable_shm_ptr,
                         is_local_ptr,
+                        enable_prefill_sp_ptr,
                         options.task_type().c_str(),
                         worker_type_ptr,
                         input_shm_size_ptr,
                         output_shm_size_ptr,
+                        communication_backend_ptr,
                         nullptr};
   pid_t pid;
   posix_spawn_file_actions_init(&file_actions_);
@@ -205,15 +211,15 @@ void WorkerServer::prepare_shm(
     std::string name_prefix =
         "xllm_" + net::extract_port(options.master_node_addr().value());
     string name = ForwardSharedMemoryManager::create_unique_name(
-        name_prefix, dp_group, FORWARD_RAW_INPUT_TYPE, parallel_args.rank());
+        name_prefix, dp_group, ForwardType::RAW_INPUT, parallel_args.rank());
     input_shm_manager = std::make_unique<ForwardSharedMemoryManager>(
-        name, options.input_shm_size(), is_creator, FORWARD_RAW_INPUT_TYPE);
+        name, options.input_shm_size(), is_creator, ForwardType::RAW_INPUT);
     LOG(INFO) << "Create input shared memory manager with name: " << name;
 
     name = ForwardSharedMemoryManager::create_unique_name(
-        name_prefix, dp_group, FORWARD_RAW_OUTPUT_TYPE, parallel_args.rank());
+        name_prefix, dp_group, ForwardType::RAW_OUTPUT, parallel_args.rank());
     output_shm_manager = std::make_unique<ForwardSharedMemoryManager>(
-        name, options.output_shm_size(), is_creator, FORWARD_RAW_OUTPUT_TYPE);
+        name, options.output_shm_size(), is_creator, ForwardType::RAW_OUTPUT);
     LOG(INFO) << "Create output shared memory manager with name: " << name;
   }
 }
@@ -256,10 +262,10 @@ WorkerServer::WorkerServer(int local_worker_idx,
       worker_thread_ =
           std::make_unique<std::thread>(&WorkerServer::create_server,
                                         this,
-                                        std::cref(options),
+                                        options,
                                         std::ref(done),
-                                        std::cref(master_node_addr),
-                                        std::cref(d),
+                                        master_node_addr,
+                                        d,
                                         parallel_args.world_size(),
                                         parallel_args.rank(),
                                         parallel_args.dp_size(),
@@ -296,7 +302,7 @@ bool WorkerServer::sync_master_node(const std::string& master_node_addr,
   const int sleep_time_second = 3;
   while (try_count < FLAGS_max_reconnect_count) {
     cntl.Reset();
-    stub.Sync(&cntl, &addr_info, &uids, NULL);
+    stub.Sync(&cntl, &addr_info, &uids, nullptr);
     if (cntl.Failed()) {
       LOG(WARNING) << "Worker#" << addr_info.global_rank()
                    << " try connect to engine server error, try again."
@@ -326,7 +332,7 @@ WorkerServer::~WorkerServer() {
     worker_server->stop();
   }
 
-  if (worker_thread_->joinable()) {
+  if (worker_thread_ && worker_thread_->joinable()) {
     worker_thread_->join();
   }
 

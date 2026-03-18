@@ -24,7 +24,7 @@ limitations under the License.
 #define cpu_relax() asm volatile("yield\n" : : : "memory")
 #endif
 
-typedef volatile int64_t easy_atomic_t;
+using easy_atomic_t = volatile int64_t;
 static __inline__ void easy_atomic_add(easy_atomic_t* v, int64_t i) {
 #if defined(__x86_64__)
   __asm__ __volatile__(EASY_SMP_LOCK "addq %1,%0"
@@ -85,15 +85,15 @@ static __inline__ void easy_atomic_dec(easy_atomic_t* v) {
 #define EASY_QUEUE_FULL (-6)
 #define EASY_AGAIN (-EAGAIN)
 
-typedef struct easy_spinrwlock_t {
+struct easy_spinrwlock_t {
   easy_atomic_t ref_cnt;
   easy_atomic_t wait_write;
-} easy_spinrwlock_t;
+};
 #define EASY_SPINRWLOCK_INITIALIZER {0, 0}
 static __inline__ int easy_spinrwlock_rdlock(easy_spinrwlock_t* lock) {
   int ret = EASY_OK;
 
-  if (NULL == lock) {
+  if (lock == nullptr) {
     ret = EASY_ERROR;
   } else {
     int cond = 1;
@@ -123,7 +123,7 @@ static __inline__ int easy_spinrwlock_rdlock(easy_spinrwlock_t* lock) {
 static __inline__ int easy_spinrwlock_wrlock(easy_spinrwlock_t* lock) {
   int ret = EASY_OK;
 
-  if (NULL == lock) {
+  if (lock == nullptr) {
     ret = EASY_ERROR;
   } else {
     int cond = 1;
@@ -157,7 +157,7 @@ static __inline__ int easy_spinrwlock_wrlock(easy_spinrwlock_t* lock) {
 static __inline__ int easy_spinrwlock_try_rdlock(easy_spinrwlock_t* lock) {
   int ret = EASY_OK;
 
-  if (NULL == lock) {
+  if (lock == nullptr) {
     ret = EASY_ERROR;
   } else {
     ret = EASY_AGAIN;
@@ -177,7 +177,7 @@ static __inline__ int easy_spinrwlock_try_rdlock(easy_spinrwlock_t* lock) {
 static __inline__ int easy_spinrwlock_try_wrlock(easy_spinrwlock_t* lock) {
   int ret = EASY_OK;
 
-  if (NULL == lock) {
+  if (lock == nullptr) {
     ret = EASY_ERROR;
   } else {
     ret = EASY_AGAIN;
@@ -197,7 +197,7 @@ static __inline__ int easy_spinrwlock_try_wrlock(easy_spinrwlock_t* lock) {
 static __inline__ int easy_spinrwlock_unlock(easy_spinrwlock_t* lock) {
   int ret = EASY_OK;
 
-  if (NULL == lock) {
+  if (lock == nullptr) {
     ret = EASY_ERROR;
   } else {
     while (1) {
@@ -228,7 +228,7 @@ namespace xllm {
 
 class spin_rd_lock {
  public:
-  typedef easy_spinrwlock_t lock_type;
+  using lock_type = easy_spinrwlock_t;
 
   explicit spin_rd_lock(lock_type* lock) : lock_(lock) {
     easy_spinrwlock_rdlock(lock_);
@@ -244,7 +244,7 @@ class spin_rd_lock {
 
 class spin_wr_lock {
  public:
-  typedef easy_spinrwlock_t lock_type;
+  using lock_type = easy_spinrwlock_t;
 
   explicit spin_wr_lock(lock_type* lock) : lock_(lock) {
     easy_spinrwlock_wrlock(lock_);

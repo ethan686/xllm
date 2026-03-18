@@ -56,10 +56,12 @@ static std::unordered_set<std::string> deepseek_like_model_set = {
     "kimi_k2",
     "glm4_moe_lite",
     "glm_moe_dsa",  // glm5 model type
+    "glm_moe_dsa_mtp",
     "joyai_llm_flash"};
 
 static const std::unordered_set<std::string> prefill_sp_supported_model_set = {
-    "deepseek_v32"};
+    "deepseek_v32",
+    "glm_moe_dsa"};
 
 void shutdown_handler(int signal) {
   // TODO: gracefully shutdown the server
@@ -132,6 +134,38 @@ void validate_flags(const std::string& model_type) {
   if (FLAGS_block_size != 16 && FLAGS_block_size != 1) {
     LOG(FATAL) << "Currently, block_size must be 16 for MLU backend, we will "
                   "support other block sizes in the future.";
+  }
+#endif
+
+#if defined(USE_NPU)
+  // enable_xtensor / enable_rolling_load imply enable_manual_loader
+  if ((FLAGS_enable_xtensor || FLAGS_enable_rolling_load) &&
+      !FLAGS_enable_manual_loader) {
+    LOG(WARNING) << "enable_xtensor or enable_rolling_load requires "
+                    "enable_manual_loader; forcing enable_manual_loader=true.";
+    FLAGS_enable_manual_loader = true;
+  }
+  if (FLAGS_enable_rolling_load && FLAGS_rolling_load_num_cached_layers < 1) {
+    LOG(FATAL) << "rolling_load_num_cached_layers must be >= 1.";
+  }
+  if (FLAGS_enable_rolling_load && FLAGS_rolling_load_num_rolling_slots < -1) {
+    LOG(FATAL) << "rolling_load_num_rolling_slots must be >= -1.";
+  }
+  if (FLAGS_enable_rolling_load && FLAGS_rolling_load_num_rolling_slots >= 0 &&
+      FLAGS_rolling_load_num_rolling_slots >
+          FLAGS_rolling_load_num_cached_layers) {
+    LOG(FATAL) << "rolling_load_num_rolling_slots must be <= "
+               << "rolling_load_num_cached_layers.";
+  }
+#else
+  if (FLAGS_enable_xtensor) {
+    LOG(FATAL) << "enable_xtensor is only supported on NPU.";
+  }
+  if (FLAGS_enable_manual_loader) {
+    LOG(FATAL) << "enable_manual_loader is only supported on NPU.";
+  }
+  if (FLAGS_enable_rolling_load) {
+    LOG(FATAL) << "enable_rolling_load is only supported on NPU.";
   }
 #endif
 }
@@ -244,6 +278,7 @@ int run() {
       .expert_parallel_degree(FLAGS_expert_parallel_degree)
       .enable_mla(FLAGS_enable_mla)
       .enable_chunked_prefill(FLAGS_enable_chunked_prefill)
+      .enable_prefill_sp(FLAGS_enable_prefill_sp)
       .master_node_addr(FLAGS_master_node_addr)
       .instance_role(InstanceRole(FLAGS_instance_role))
       .device_ip("")

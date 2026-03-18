@@ -1,10 +1,12 @@
 import argparse
+from argparse import Namespace
 
 class ArgumentParser:
-    def __init__(self):
+    def __init__(self) -> None:
         self.parser = argparse.ArgumentParser()
         self.parser.add_argument('--model', type=str, help='"Name or path of the huggingface model to use."')
         self.parser.add_argument('--task', type=str, default="generate", help='The task to use the model for. generate/embed.')
+        self.parser.add_argument('--runner', type=str, choices=['pooling'], default=None, help='Optional runner mode for LLM. Currently supports: pooling.')
         self.parser.add_argument('--devices', type=str, default='auto', help='Devices to run the model on, e.g. cpu, cuda:0, cuda:0,cuda:1, or auto to use all available gpus.')
         self.parser.add_argument('--draft_model', type=str, default='', help='draft hf model path to the model file.')
         self.parser.add_argument('--draft_devices', type=str, default='auto', help='Devices to run the draft model on, e.g. cpu, cuda:0, cuda:0,cuda:1, or auto to use all available gpus.')
@@ -17,11 +19,12 @@ class ArgumentParser:
         self.parser.add_argument('--max_tokens_per_chunk_for_prefill', type=int, default=512, help='Max number of tokens per chunk for request in prefill stage.')
         self.parser.add_argument('--num_speculative_tokens', type=int, default=0, help='Number of speculative tokens.')
         self.parser.add_argument('--num_request_handling_threads', type=int, default=4, help='Number of handling threads.')
-        self.parser.add_argument('--communication_backend', type=str, default='lccl', help='npu communication backend.')
+        self.parser.add_argument('--communication_backend', type=str, default='hccl', help='npu communication backend.')
         self.parser.add_argument('--rank_tablefile', type=str, default='', help='atb hccl rank table file')
         self.parser.add_argument('--expert_parallel_degree', type=int, default=0, help='ep degree')
         self.parser.add_argument('--enable_mla', action='store_true', help='whether to enable multi-head latent attention.')
         self.parser.add_argument('--disable_chunked_prefill', action='store_true', help='Whether to disable chunked prefill.')
+        self.parser.add_argument('--enable_prefill_sp', action='store_true', help='Enable prefill-only sequence parallel.')
         self.parser.add_argument('--master_node_addr', type=str, default='', help='The master address for multi-node distributed serving(e.g. 10.18.1.1:9999).')
         self.parser.add_argument('--instance_role', type=str, default='DEFAULT', help='The role of instance(e.g. DEFAULT, PREFILL, DECODE, MIX).')
         self.parser.add_argument('--device_ip', type=str, default='', help='The device ip.')
@@ -43,5 +46,5 @@ class ArgumentParser:
         self.parser.add_argument('--output_shm_size', type=int, default=128, help='The size of output shared memory in MB.')
         self.parser.add_argument('--kv_cache_dtype', type=str, default='auto', help='KV cache data type. "auto" (default) aligns with model dtype, "int8" enables INT8 quantization (MLU only).')
 
-    def parse_args(self):
+    def parse_args(self) -> Namespace:
         return self.parser.parse_args()

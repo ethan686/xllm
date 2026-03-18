@@ -3,10 +3,11 @@ import signal
 import sys
 import time
 from . import util
-from typing import List, Optional, Union
+from typing import Any, List, Optional, Union
 
 from xllm_export import (LLMMaster, Options, RequestOutput,
                          RequestParams)
+from .errors import ValidationError
 
 class Embedding:
     def __init__(
@@ -26,6 +27,7 @@ class Embedding:
         expert_parallel_degree: int = 0,
         enable_mla: bool = False,
         disable_chunked_prefill: bool = False,
+        enable_prefill_sp: bool = False,
         instance_role: str = 'DEFAULT',
         nnodes: int = 1,
         node_rank: int = 0,
@@ -35,7 +37,7 @@ class Embedding:
         is_local: bool = True,
         input_shm_size: int = 1024,
         output_shm_size: int = 128,
-        **kwargs,
+        **kwargs: Any,
     ) -> None:
         signal.signal(signal.SIGTERM, lambda s, f: sys.exit(0))
         signal.signal(signal.SIGINT, lambda s, f: sys.exit(0))
@@ -69,6 +71,7 @@ class Embedding:
             options.enable_chunked_prefill = False
         else:
             options.enable_chunked_prefill = True
+        options.enable_prefill_sp = enable_prefill_sp
         free_port = util.get_free_port()
         options.master_node_addr = "127.0.0.1:" + str(free_port)
         options.nnodes = nnodes
@@ -85,7 +88,7 @@ class Embedding:
         options.output_shm_size = output_shm_size
         self.master = LLMMaster(options)
 
-    def finish(self):
+    def finish(self) -> None:
         try:
             #os.kill(os.getpid(), signal.SIGTERM)
             #os.kill(os.getpid(), signal.SIGKILL)
@@ -97,7 +100,7 @@ class Embedding:
         self,
         inputs: Union[str, List[str]],
         request_params: Optional[Union[RequestParams, List[RequestParams]]] = None,
-        wait_schedule_done: bool = True,
+        wait_for_schedule: bool = True,
     ) -> List[RequestOutput]:
         if request_params is None:
             request_params = RequestParams()
@@ -121,7 +124,7 @@ class Embedding:
         )
 
         # TODO: add wait later
-        if wait_schedule_done:
+        if wait_for_schedule:
             pass
 
         # generate

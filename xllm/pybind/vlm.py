@@ -1,12 +1,16 @@
 import os
 import signal
 import sys
-import time
 from . import util
 from typing import List, Optional, Union, Dict, Any
-
 from xllm_export import (VLMMaster, Options, RequestOutput,
-                         RequestParams, MMType, MMData)
+                         RequestParams, MMData)
+from .errors import ValidationError
+from .params import (
+    SamplingParams,
+    to_request_params_list,
+)
+
 
 class VLM:
     def __init__(
@@ -20,16 +24,17 @@ class VLM:
         max_cache_size: int = 0,
         max_memory_utilization: float = 0.9,
         disable_prefix_cache: bool = False,
-        max_tokens_per_batch: int = 20000,
+        max_tokens_per_batch: int = 50000,
         max_seqs_per_batch: int = 256,
         max_tokens_per_chunk_for_prefill: int = 512,
         num_speculative_tokens: int = 0,
         num_request_handling_threads: int = 4,
-        communication_backend: str = 'lccl',
+        communication_backend: str = 'hccl',
         rank_tablefile: str = '',
         expert_parallel_degree: int = 0,
         enable_mla: bool = False,
         disable_chunked_prefill: bool = False,
+        enable_prefill_sp: bool = False,
         instance_role: str = 'DEFAULT',
         device_ip: str = '',
         transfer_listen_port: int = 26000,
@@ -45,13 +50,14 @@ class VLM:
         is_local: bool = True,
         input_shm_size: int = 1024,
         output_shm_size: int = 128,
-        **kwargs,
+        **kwargs: Any,
     ) -> None:
         signal.signal(signal.SIGTERM, lambda s, f: sys.exit(0))
         signal.signal(signal.SIGINT, lambda s, f: sys.exit(0))
 
         if not os.path.exists(model):
             raise ValueError(f"model {model} not exists")
+        self.model = model
 
         options = Options()
         options.model_path = model
@@ -80,6 +86,7 @@ class VLM:
             options.enable_chunked_prefill = False
         else:
             options.enable_chunked_prefill = True
+        options.enable_prefill_sp = enable_prefill_sp
         free_port = util.get_free_port()
         options.master_node_addr = "127.0.0.1:" + str(free_port)
         options.device_ip = device_ip
@@ -100,7 +107,7 @@ class VLM:
         options.output_shm_size = output_shm_size
         self.master = VLMMaster(options)
 
-    def finish(self):
+    def finish(self) -> None:
         try:
             #os.kill(os.getpid(), signal.SIGTERM)
             #os.kill(os.getpid(), signal.SIGKILL)
@@ -110,25 +117,52 @@ class VLM:
 
     def generate(
         self,
-        prompts: List[str],
-        multi_modal_data: List[MMData],
-        request_params: Optional[Union[RequestParams, List[RequestParams]]] = None,
+        prompts: Union[
+            str,
+            List[str],
+            Dict[str, Any],
+            List[Dict[str, Any]],
+        ],
+        sampling_params: Optional[Union[
+            SamplingParams,
+            List[SamplingParams],
+        ]] = None,
         wait_for_schedule: bool = True,
+        **kwargs: Any,
     ) -> List[RequestOutput]:
-        # use default sampling parameters if not provided
+        from . import mm_utils
+        prompts, mm_datas, image_urls = mm_utils.normalize_vllm_style_inputs(prompts)
+
+        request_params = kwargs.pop("request_params", None)
+        if kwargs:
+            unknown = ", ".join(kwargs.keys())
+            raise TypeError(f"Unexpected keyword arguments: {unknown}")
         if request_params is None:
-            request_params = RequestParams()
-        if isinstance(request_params, RequestParams):
-            request_params = [request_params]
+            request_params = sampling_params
+        elif sampling_params is not None:
+            raise ValueError("sampling_params and request_params cannot both be set")
+
+        request_params_list = to_request_params_list(
+            request_params, default_cls=SamplingParams
+        )
+        if len(request_params_list) not in (1, len(prompts)):
+            raise ValueError(
+                "The number of request_params must be 1 or equal to the number of prompts."
+            )
 
         outputs = [None] * len(prompts)
         def callback(index: int, output: RequestOutput) -> bool:
             outputs[index] = output
             return True
         # schedule the batch requests
-        future = self.master.handle_batch_request(
-            prompts, multi_modal_data, request_params, callback
-        )
+        if image_urls is not None:
+            self.master.handle_batch_request_with_image_urls(
+                prompts, image_urls, request_params_list, callback
+            )
+        else:
+            self.master.handle_batch_request(
+                prompts, mm_datas, request_params_list, callback
+            )
 
         # wait for batch request to be scheduled
         if wait_for_schedule:
