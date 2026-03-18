@@ -901,7 +901,8 @@ TORCH_MODULE(AdaLayerNormZeroSingle);
 
 class AdaLayerNormContinuousImpl : public torch::nn::Module {
  public:
-  explicit AdaLayerNormContinuousImpl(ModelContext context, bool with_bias=true)
+  explicit AdaLayerNormContinuousImpl(ModelContext context,
+                                      bool with_bias = true)
       : options_(context.get_tensor_options()) {
     ModelArgs model_args = context.get_model_args();
     auto num_attention_heads = model_args.n_heads();

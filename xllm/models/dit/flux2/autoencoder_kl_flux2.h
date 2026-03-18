@@ -147,9 +147,9 @@ class Flux2VaeImpl : public torch::nn::Module {
         << "running_mean is not loaded for " << prefix + "bn.running_mean";
     CHECK(is_bn_running_var_)
         << "running_var is not loaded for " << prefix + "bn.running_var";
-   /* CHECK(is_bn_num_batches_tracked_)
-        << "num_batches_tracked is not loaded for "
-        << prefix + "bn.num_batches_tracked";*/
+    /* CHECK(is_bn_num_batches_tracked_)
+         << "num_batches_tracked is not loaded for "
+         << prefix + "bn.num_batches_tracked";*/
   }
 
   torch::Tensor get_bn_running_mean() const { return bn_->running_mean; }

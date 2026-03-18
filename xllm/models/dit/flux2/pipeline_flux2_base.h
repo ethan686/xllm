@@ -168,13 +168,13 @@ class Flux2PosEmbedImpl : public torch::nn::Module {
 
     if (height != cached_image_height_ || width != cached_image_width_ ||
         seq_len != max_seq_len_) {
-      torch::Tensor ids = torch::cat({txt_ids, img_ids},1);//已修�~T�
+      torch::Tensor ids = torch::cat({txt_ids, img_ids}, 1);  // 已修�~T�
       LOG(INFO) << "----------concat.ids" << ids.sizes();
       cached_image_height_ = height;
       cached_image_width_ = width;
       max_seq_len_ = seq_len;
       auto [cos, sin] = forward(ids);
-      LOG(INFO) << "----------C++.forward.ids" << ids.sizes(); 
+      LOG(INFO) << "----------C++.forward.ids" << ids.sizes();
       freqs_cos_cache_ = std::move(cos);
       freqs_sin_cache_ = std::move(sin);
     }
@@ -187,9 +187,9 @@ class Flux2PosEmbedImpl : public torch::nn::Module {
     auto pos = ids.to(torch::kFloat32);
     torch::Dtype freqs_dtype = torch::kFloat64;
     for (int64_t i = 0; i < n_axes; ++i) {
-      LOG(INFO) << "----------before---pos.select()" << std::endl; 
-      auto pos_slice = pos.select(-1, i).squeeze(0);//已修改
-      LOG(INFO) << "----------after---pos.select(-1, i)" << std::endl; 
+      LOG(INFO) << "----------before---pos.select()" << std::endl;
+      auto pos_slice = pos.select(-1, i).squeeze(0);  // 已修改
+      LOG(INFO) << "----------after---pos.select(-1, i)" << std::endl;
       auto result = get_1d_rotary_pos_embed(
           axes_dim_[i], pos_slice, theta_, true, 1, 1, true, freqs_dtype);
       LOG(INFO) << "----------get_1d_rotary_pos_embed-----" << std::endl;

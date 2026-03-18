@@ -159,13 +159,15 @@ class Flux2FeedForwardImpl : public torch::nn::Module {
     auto num_attention_heads = model_args.n_heads();
     auto attention_head_dim = model_args.head_dim();
     auto inner_dim = num_attention_heads * attention_head_dim;
-    //std::cout << "--------------inner_dim:--------------" << inner_dim << std::endl;
+    // std::cout << "--------------inner_dim:--------------" << inner_dim <<
+    // std::endl;
     linear_in_ = register_module(
         "linear_in",
         layer::AddMatmul(inner_dim, inner_dim * 6, false, options_));
     act_fn_ = register_module("act_fn", Flux2SwiGLU());
     linear_out_ = register_module(
-        "linear_out", layer::AddMatmul(inner_dim * 3, inner_dim, false, options_));
+        "linear_out",
+        layer::AddMatmul(inner_dim * 3, inner_dim, false, options_));
   }
 
   torch::Tensor forward(const torch::Tensor& hidden_states) {
@@ -176,8 +178,7 @@ class Flux2FeedForwardImpl : public torch::nn::Module {
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    linear_in_->load_state_dict(
-        state_dict.get_dict_with_prefix("linear_in."));
+    linear_in_->load_state_dict(state_dict.get_dict_with_prefix("linear_in."));
     linear_out_->load_state_dict(
         state_dict.get_dict_with_prefix("linear_out."));
   }
@@ -1023,7 +1024,8 @@ class Flux2Transformer2DModelImpl : public torch::nn::Module {
       single_transformer_block_layers_.push_back(block);
     }
 
-    norm_out_ = register_module("norm_out", AdaLayerNormContinuous(context, false));
+    norm_out_ =
+        register_module("norm_out", AdaLayerNormContinuous(context, false));
     proj_out_ = register_module(
         "proj_out",
         layer::AddMatmul(inner_dim,
@@ -1104,7 +1106,8 @@ class Flux2Transformer2DModelImpl : public torch::nn::Module {
         block->load_state_dict(state_dict->get_dict_with_prefix(
             "single_transformer_blocks." + std::to_string(i) + "."));
       }
-      //std::cout << "-----------norm_out_--------" << state_dict->get_dict_with_prefix("norm_out.") << std::endl;
+      // std::cout << "-----------norm_out_--------" <<
+      // state_dict->get_dict_with_prefix("norm_out.") << std::endl;
       norm_out_->load_state_dict(state_dict->get_dict_with_prefix("norm_out."));
       proj_out_->load_state_dict(state_dict->get_dict_with_prefix("proj_out."));
     }

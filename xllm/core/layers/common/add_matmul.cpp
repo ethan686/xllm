@@ -51,6 +51,8 @@ torch::Tensor AddMatmulImpl::forward(const torch::Tensor& x) {
 
 void AddMatmulImpl::load_state_dict(const xllm::StateDict& state_dict) {
   xllm::weight::load_weight(state_dict, "weight", weight_, weight_is_loaded_);
+  // std::cout << "--------------------weight_is_loaded_:" << weight_is_loaded_
+  // << std::endl;
   if (with_bias_) {
     xllm::weight::load_weight(state_dict, "bias", bias_, bias_is_loaded_);
   }
