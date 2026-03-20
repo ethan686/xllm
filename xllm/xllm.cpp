@@ -187,7 +187,8 @@ int run() {
     FLAGS_max_tokens_per_chunk_for_prefill = FLAGS_max_tokens_per_batch;
   }
 
-  std::string model_type = get_model_type(model_path);
+  // std::string model_type = get_model_type(model_path);
+  std::string model_type = "";
   // set enable_mla by model type
   if (FLAGS_backend != "dit") {
     if (deepseek_like_model_set.find(model_type) !=

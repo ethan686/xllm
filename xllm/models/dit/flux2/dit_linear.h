@@ -48,21 +48,20 @@ struct LinearExtraArgs {
 // Linear layer with column parallelism.
 // The linear layer is defined as Y = XA + b. A is parallelized along
 // its second dimension as A = [A_1, ..., A_p].
-class ColumnParallelLinearImpl : public torch::nn::Module {
+class Dit_ColumnParallelLinearImpl : public torch::nn::Module {
  public:
-  ColumnParallelLinearImpl(
-      int64_t in_features,
-      int64_t out_features,
-      bool bias,
-      bool gather_output,
-      const QuantArgs& quant_args,
-      ProcessGroup* process_group,
-      const torch::TensorOptions& options,
-      const LinearExtraArgs& linear_extra_args = LinearExtraArgs());
+  Dit_ColumnParallelLinearImpl(int64_t in_features,
+                               int64_t out_features,
+                               bool bias,
+                               bool gather_output,
+                               const QuantArgs& quant_args,
+                               ProcessGroup* process_group,
+                               const torch::TensorOptions& options);
+  // const LinearExtraArgs& linear_extra_args = LinearExtraArgs());
 
-  ColumnParallelLinearImpl(const ModelContext& context);
+  Dit_ColumnParallelLinearImpl(const ModelContext& context);
 
-  torch::Tensor forward(torch::Tensor input, bool use_full_w = false);
+  torch::Tensor forward(torch::Tensor input);
 
   // load the weight from the checkpoint
   void load_state_dict(const StateDict& state_dict);
@@ -138,20 +137,20 @@ class ColumnParallelLinearImpl : public torch::nn::Module {
   at::ScalarType output_dtype_;
   LinearExtraArgs linear_extra_args_;
 };
-TORCH_MODULE(ColumnParallelLinear);
+TORCH_MODULE(Dit_ColumnParallelLinear);
 
-class QKVParallelLinearImpl : public torch::nn::Module {
+class Dit_QKVParallelLinearImpl : public torch::nn::Module {
  public:
-  QKVParallelLinearImpl(int64_t hidden_size,
-                        int64_t num_heads,
-                        int64_t num_kv_heads,
-                        int64_t head_size,
-                        int64_t num_kv_head_replicas,
-                        bool bias,
-                        bool gather_output,
-                        const ParallelArgs& parallel_args,
-                        const torch::TensorOptions& options,
-                        const QuantArgs& quant_args = QuantArgs{});
+  Dit_QKVParallelLinearImpl(int64_t hidden_size,
+                            int64_t num_heads,
+                            int64_t num_kv_heads,
+                            int64_t head_size,
+                            int64_t num_kv_head_replicas,
+                            bool bias,
+                            bool gather_output,
+                            const ParallelArgs& parallel_args,
+                            const torch::TensorOptions& options,
+                            const QuantArgs& quant_args = QuantArgs{});
 
   torch::Tensor forward(torch::Tensor input);
 
@@ -200,7 +199,7 @@ class QKVParallelLinearImpl : public torch::nn::Module {
   QuantArgs quant_args_;
   at::ScalarType output_dtype_;
 };
-TORCH_MODULE(QKVParallelLinear);
+TORCH_MODULE(Dit_QKVParallelLinear);
 
 // Linear layer with row parallelism.
 //     The linear layer is defined as Y = XA + b. A is parallelized along
@@ -212,20 +211,21 @@ TORCH_MODULE(QKVParallelLinear);
 //               | .   |
 //               | A_p |
 //                -   -
-class RowParallelLinearImpl : public torch::nn::Module {
+class Dit_RowParallelLinearImpl : public torch::nn::Module {
  public:
-  RowParallelLinearImpl(
-      int64_t in_features,
-      int64_t out_features,
-      bool bias,
-      bool input_is_parallelized,
-      bool enable_result_reduction,
-      const QuantArgs& quant_args,
-      ProcessGroup* process_group,
-      const torch::TensorOptions& options,
-      const LinearExtraArgs& linear_extra_args = LinearExtraArgs());
+  Dit_RowParallelLinearImpl(const ModelContext& context);
 
-  torch::Tensor forward(torch::Tensor input, bool use_full_w = false);
+  Dit_RowParallelLinearImpl(int64_t in_features,
+                            int64_t out_features,
+                            bool bias,
+                            bool input_is_parallelized,
+                            bool enable_result_reduction,
+                            // const QuantArgs& quant_args,
+                            ProcessGroup* process_group,
+                            const torch::TensorOptions& options);
+  // const LinearExtraArgs& linear_extra_args = LinearExtraArgs());
+
+  torch::Tensor forward(torch::Tensor input);
 
   // load the weight from the checkpoint
   void load_state_dict(const StateDict& state_dict);
@@ -292,10 +292,10 @@ class RowParallelLinearImpl : public torch::nn::Module {
   // quantization args
   QuantArgs quant_args_;
   at::ScalarType output_dtype_;
-  LinearExtraArgs linear_extra_args_;
   std::optional<CachedTPSlices> tp_cache_;
+  // LinearExtraArgs linear_extra_args_;
 };
-TORCH_MODULE(RowParallelLinear);
+TORCH_MODULE(Dit_RowParallelLinear);
 
 class ReplicatedLinearImpl : public torch::nn::Module {
  public:
