@@ -48,7 +48,7 @@ DenseMLPImpl::DenseMLPImpl(int64_t hidden_size,
           << ", activation_dynamic=" << quant_args.activation_dynamic();
     }
   }
-
+  // --------------------1 modify--------------------
   // Determine extra args based on quantization mode
   LinearExtraArgs gate_up_proj_extra_args("none", false);
   LinearExtraArgs down_proj_extra_args("none", false);
