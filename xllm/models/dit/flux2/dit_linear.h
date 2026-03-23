@@ -25,7 +25,6 @@ limitations under the License.
 #include "framework/state_dict/utils.h"
 
 namespace xllm {
-namespace layer {
 
 // extra args for parallel linear behavior.
 struct LinearExtraArgs {
@@ -224,7 +223,6 @@ class Dit_RowParallelLinearImpl : public torch::nn::Module {
                             ProcessGroup* process_group,
                             const torch::TensorOptions& options);
   // const LinearExtraArgs& linear_extra_args = LinearExtraArgs());
-
   torch::Tensor forward(torch::Tensor input);
 
   // load the weight from the checkpoint
@@ -326,5 +324,4 @@ class ReplicatedLinearImpl : public torch::nn::Module {
 };
 TORCH_MODULE(ReplicatedLinear);
 
-}  // namespace layer
 }  // namespace xllm

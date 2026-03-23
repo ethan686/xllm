@@ -38,19 +38,19 @@ export INF_NAN_MODE_FORCE_DISABLE=1
 MODEL_PATH="/export/home/weinan5/wangshuibin/08_bowei_flux2_xllm/flux2_xllm/flux2/text_encoder/"
 MASTER_NODE_ADDR="127.0.0.1:19751"                  # Master 节点地址（需全局一致）
 START_PORT=18002                                   # 服务起始端口
-START_DEVICE=2                                     # 起始 NPU 逻辑设备号
+START_DEVICE=1                                     # 起始 NPU 逻辑设备号
 LOG_DIR="log"                                      # 日志目录
 NNODES=2                                           # 节点数（当前脚本启动 2 个进程）
 
 export HCCL_IF_BASE_PORT=43432  # HCCL 通信基础端口
 
-for (( i=0; i<1; i++ ))
+for (( i=0; i<2; i++ ))
 do
   PORT=$((START_PORT + i))
   DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/node_$i.log"
   ./build/xllm/core/server/xllm \
-    --model="/export/home/weinan5/wangshuibin/08_bowei_flux2_xllm/flux2_xllm/flux2/" \
+    --model="/export/home/zhubowei/flux2" \
     --max_memory_utilization=0.6 \
     --backend="dit" \
     --dit_tp_size=2 \
