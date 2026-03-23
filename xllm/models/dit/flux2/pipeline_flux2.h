@@ -46,7 +46,9 @@ class Flux2PipelineImpl : public Flux2PipelineBaseImpl {
         "pos_embed",
         Flux2PosEmbed(context.get_model_args("transformer").rope_theta(),
                       context.get_model_args("transformer").axes_dims_rope()));
-    transformer_ = Flux2DiTModel(context.get_model_context("transformer"));
+    // transformer_ = Flux2DiTModel(context.get_model_context("transformer"));
+    transformer_ = Flux2DiTModel(context.get_model_context("transformer"),
+                                 context.get_parallel_args());
     // mistral3_ =
     // Mistral3EncoderModel(context.get_model_context("text_encoder"));
     scheduler_ =
@@ -208,7 +210,8 @@ class Flux2PipelineImpl : public Flux2PipelineBaseImpl {
     torch::Tensor encoded_prompt_embeds;
     torch::Tensor text_ids;
 
-    device_ = torch::Device("npu:0");
+    // device_ = torch::Device("npu:0");
+    device_ = options_.device();
     auto encoded_prompt_embeds_load = StateDictFromSafeTensor::load(
         "/export/home/weinan5/08_dump_save_tensor_data/"
         "prompt_embeds_save.safetensors");

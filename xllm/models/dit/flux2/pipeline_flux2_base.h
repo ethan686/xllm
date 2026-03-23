@@ -333,10 +333,10 @@ class Flux2PipelineBaseImpl : public torch::nn::Module {
     int64_t height = latents.size(2);
     int64_t width = latents.size(3);
 
-    auto t = torch::arange(1, options_);
+    auto t = torch::arange(1, 2, options_);
     auto h = torch::arange(height, options_);
     auto w = torch::arange(width, options_);
-    auto l = torch::arange(1, options_);
+    auto l = torch::arange(1, 2, options_);
 
     auto grid = torch::meshgrid({t, h, w, l}, "ij");
     auto coords = torch::stack({grid[0].flatten(),

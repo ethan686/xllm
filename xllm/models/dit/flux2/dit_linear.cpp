@@ -26,7 +26,6 @@ limitations under the License.
 #include "linear.h"
 
 namespace xllm {
-namespace layer {
 
 Dit_ColumnParallelLinearImpl::Dit_ColumnParallelLinearImpl(
     const ModelContext& context)
@@ -472,5 +471,4 @@ void ReplicatedLinearImpl::load_state_dict(const StateDict& state_dict) {
   }
 }
 
-}  // namespace layer
 }  // namespace xllm
