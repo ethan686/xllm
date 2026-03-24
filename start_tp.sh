@@ -36,9 +36,9 @@ export INF_NAN_MODE_FORCE_DISABLE=1
 
 # 4. 启动分布式服务
 MODEL_PATH="/export/home/weinan5/wangshuibin/08_bowei_flux2_xllm/flux2_xllm/flux2/text_encoder/"
-MASTER_NODE_ADDR="127.0.0.1:19751"                  # Master 节点地址（需全局一致）
-START_PORT=18002                                   # 服务起始端口
-START_DEVICE=1                                     # 起始 NPU 逻辑设备号
+MASTER_NODE_ADDR="127.0.0.1:8999"              # Master 节点地址（需全局一致）
+START_PORT=18018                                   # 服务起始端口
+START_DEVICE=12                                     # 起始 NPU 逻辑设备号
 LOG_DIR="log"                                      # 日志目录
 NNODES=2                                           # 节点数（当前脚本启动 2 个进程）
 
@@ -50,7 +50,7 @@ do
   DEVICE=$((START_DEVICE + i))
   LOG_FILE="$LOG_DIR/node_$i.log"
   ./build/xllm/core/server/xllm \
-    --model="/export/home/zhubowei/flux2" \
+    --model="/export/home/weinan5/wangshuibin/08_bowei_flux2_xllm/flux2_xllm/flux2/" \
     --max_memory_utilization=0.6 \
     --backend="dit" \
     --dit_tp_size=2 \
