@@ -71,6 +71,7 @@ struct TpOptions {
   int64_t tp_rank = 0;
   int64_t tp_size = 1;
   bool gather_output = false;
+  bool need_scatter = false;
   ProcessGroup* process_group = nullptr;
 
   TpOptions() = default;
@@ -79,11 +80,13 @@ struct TpOptions {
             int64_t tp_rank,
             int64_t tp_size,
             bool gather_output = false,
+            bool need_scatter = false,
             ProcessGroup* process_group = nullptr)
       : column_parallel(column_parallel),
         tp_rank(tp_rank),
         tp_size(tp_size),
         gather_output(gather_output),
+        need_scatter(need_scatter),
         process_group(process_group) {}
 
   void validate() const {
@@ -297,9 +300,12 @@ class DiTParallelLinearImpl : public torch::nn::Module {
   torch::Tensor forward_row_parallel(const torch::Tensor& input) {
     const auto& options = tp_options_.value();
 
+    auto scattered_input = input;
     // Scatter input if needed
-    auto scattered_input =
-        parallel_state::scatter(input, options.process_group, -1);
+    if (options.need_scatter) {
+      scattered_input =
+          parallel_state::scatter(input, options.process_group, -1);
+    }
 
     // Use direct matmul instead of WeightTransposeAddMatmul
     auto bias = has_bias_ ? std::optional<torch::Tensor>(bias_) : std::nullopt;

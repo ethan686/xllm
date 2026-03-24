@@ -348,6 +348,8 @@ class Flux2PipelineImpl : public Flux2PipelineBaseImpl {
                                   height / (vae_scale_factor_ * 2),
                                   width / (vae_scale_factor_ * 2));
     LOG(INFO) << "-------------------// pos_embed_->forward_cache" << std::endl;
+    LOG(INFO) << "rot_emb1 shape" << rot_emb1.sizes();
+    LOG(INFO) << "rot_emb2 shape" << rot_emb2.sizes();
     torch::Tensor image_rotary_emb =
         torch::stack({rot_emb1, rot_emb2}, 0).to(options_.dtype());
     LOG(INFO) << "-------------------// image_rotary_emb" << std::endl;
@@ -375,6 +377,8 @@ class Flux2PipelineImpl : public Flux2PipelineBaseImpl {
                                       latent_image_ids_input,
                                       height / (vae_scale_factor_ * 2),
                                       width / (vae_scale_factor_ * 2));
+        LOG(INFO) << "rot_emb1_img shape" << rot_emb1_img.sizes();
+        LOG(INFO) << "rot_emb2_img shape" << rot_emb2_img.sizes();
         image_rotary_emb =
             torch::stack({rot_emb1_img, rot_emb2_img}, 0).to(options_.dtype());
       }

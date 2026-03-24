@@ -117,6 +117,8 @@ class Flux2FeedForwardImpl : public torch::nn::Module {
   }
 
   torch::Tensor forward(const torch::Tensor& hidden_states) {
+    LOG(INFO) << "Flux2FeedForwardImpl forward";
+    LOG(INFO) << "hidden_states shape" << hidden_states.sizes();
     auto out = linear_in_->forward(hidden_states);
     out = act_fn_->forward(out);
     out = linear_out_->forward(out);
@@ -289,7 +291,7 @@ class Flux2AttentionImpl : public torch::nn::Module {
       const torch::Tensor& encoder_hidden_states,
       const torch::Tensor& image_rotary_emb) {
     int64_t input_ndim = hidden_states.dim();
-
+    LOG(INFO) << "hidden_states shape" << hidden_states.sizes();
     torch::Tensor hidden_states_reshaped = hidden_states;
     if (input_ndim == 4) {
       auto shape = hidden_states.sizes();
@@ -301,6 +303,8 @@ class Flux2AttentionImpl : public torch::nn::Module {
           hidden_states.view({batch_size, channel, height * width})
               .transpose(1, 2);
     }
+    LOG(INFO) << "hidden_states_reshaped shape"
+              << hidden_states_reshaped.sizes();
     int64_t context_input_ndim = encoder_hidden_states.dim();
     torch::Tensor encoder_hidden_states_reshaped = encoder_hidden_states;
     if (context_input_ndim == 4) {
@@ -313,21 +317,36 @@ class Flux2AttentionImpl : public torch::nn::Module {
           encoder_hidden_states.view({batch_size, channel, height * width})
               .transpose(1, 2);
     }
+
+    LOG(INFO) << "encoder_hidden_states shape" << encoder_hidden_states.sizes();
+    LOG(INFO) << "encoder_hidden_states_reshaped shape"
+              << encoder_hidden_states_reshaped.sizes();
+
     int64_t batch_size = encoder_hidden_states_reshaped.size(0);
     LOG(INFO) << "zhubowei checkpoint4";
+
+    hidden_states_reshaped = hidden_states_reshaped.squeeze(1).squeeze(1);
+    encoder_hidden_states_reshaped =
+        encoder_hidden_states_reshaped.squeeze(1).squeeze(1);
+
     auto query = to_q_->forward(hidden_states_reshaped);
     auto key = to_k_->forward(hidden_states_reshaped);
     auto value = to_v_->forward(hidden_states_reshaped);
-
+    LOG(INFO) << "zhubowei checkpoint5";
     int64_t inner_dim = key.size(-1);
-    int64_t attn_heads = heads_;
+    int64_t attn_heads = inner_dim / head_dim_;
 
-    int64_t head_dim = inner_dim / attn_heads;
+    int64_t head_dim = head_dim_;
     query = query.view({batch_size, -1, attn_heads, head_dim});
     key = key.view({batch_size, -1, attn_heads, head_dim});
     value = value.view({batch_size, -1, attn_heads, head_dim});
     if (norm_q_) query = std::get<0>(norm_q_(query));
     if (norm_k_) key = std::get<0>(norm_k_(key));
+
+    LOG(INFO) << "query shape" << query.sizes();
+    LOG(INFO) << "key shape" << key.sizes();
+    LOG(INFO) << "value shape" << value.sizes();
+    LOG(INFO) << "image_rotary_emb shape" << image_rotary_emb.sizes();
 
     auto encoder_hidden_states_query_proj =
         to_add_q_->forward(encoder_hidden_states_reshaped);
@@ -335,7 +354,8 @@ class Flux2AttentionImpl : public torch::nn::Module {
         to_add_k_->forward(encoder_hidden_states_reshaped);
     auto encoder_hidden_states_value_proj =
         to_add_v_->forward(encoder_hidden_states_reshaped);
-    LOG(INFO) << "zhubowei checkpoint 4";
+    LOG(INFO) << "zhubowei checkpoint 6";
+
     encoder_hidden_states_query_proj = encoder_hidden_states_query_proj.view(
         {batch_size, -1, attn_heads, head_dim});
     encoder_hidden_states_key_proj = encoder_hidden_states_key_proj.view(
@@ -349,16 +369,30 @@ class Flux2AttentionImpl : public torch::nn::Module {
     if (norm_added_k_)
       encoder_hidden_states_key_proj =
           std::get<0>(norm_added_k_(encoder_hidden_states_key_proj));
+
+    LOG(INFO) << "encoder_hidden_states_query_proj shape"
+              << encoder_hidden_states_query_proj.sizes();
+    LOG(INFO) << "encoder_hidden_states_key_proj shape"
+              << encoder_hidden_states_key_proj.sizes();
+    LOG(INFO) << "encoder_hidden_states_value_proj shape"
+              << encoder_hidden_states_value_proj.sizes();
+
     // TODO some are right some are wrong query1& key1.
     // encoder_hidden_states_query_proj
     auto query1 = torch::cat({encoder_hidden_states_query_proj, query}, 1);
     auto key1 = torch::cat({encoder_hidden_states_key_proj, key}, 1);
     auto value1 = torch::cat({encoder_hidden_states_value_proj, value}, 1);
     if (image_rotary_emb.defined()) {
+      LOG(INFO) << "zhubowei checkpoint if has rotary";
       query1 = apply_rotary_emb(query1, image_rotary_emb, false);
       key1 = apply_rotary_emb(key1, image_rotary_emb, false);
     }
     LOG(INFO) << "zhubowei checkpoint 6";
+
+    LOG(INFO) << "queri1 shape" << query1.sizes();
+    LOG(INFO) << "key1 shape" << key1.sizes();
+    LOG(INFO) << "value1 shape" << value1.sizes();
+
 #if defined(USE_NPU)
     // torch::Tensor attn_output = torch::scaled_dot_product_attention(
     //     query1, key1, value1, torch::nullopt, 0.0, false);
@@ -380,6 +414,9 @@ class Flux2AttentionImpl : public torch::nn::Module {
     auto attn_output = std::get<0>(results);
 
     attn_output = attn_output.reshape({batch_size, -1, attn_heads * head_dim});
+
+    LOG(INFO) << "attn output shape" << attn_output.sizes();
+
 #elif defined(USE_CUDA)
     // SDPA expects (B, H, S, D); our query1/key1/value1 are (B, S, H, D).
     // Transpose to match diffusers dispatch_attention_fn (permute 0,2,1,3).
@@ -393,6 +430,8 @@ class Flux2AttentionImpl : public torch::nn::Module {
 #else
     NOT_IMPLEMENTED();
 #endif
+
+    LOG(INFO) << "check before attn output";
     attn_output = attn_output.to(query.dtype());
 
     int64_t encoder_length = encoder_hidden_states_reshaped.size(1);
@@ -400,6 +439,9 @@ class Flux2AttentionImpl : public torch::nn::Module {
     torch::Tensor hidden_output = attn_output.slice(1, encoder_length);
     encoder_output = encoder_output.flatten(2);
     hidden_output = hidden_output.flatten(2);
+    LOG(INFO) << "hidden_output shape" << hidden_output.sizes();
+    LOG(INFO) << "encoder_output shape" << encoder_output.sizes();
+
     hidden_output = to_out_->forward(hidden_output);
     encoder_output = to_add_out_->forward(encoder_output);
 
@@ -776,46 +818,42 @@ class Flux2TransformerBlockImpl : public torch::nn::Module {
     auto [shift_msa_txt, scale_msa_txt, gate_msa_txt] = txt_mod_params[0];
     auto [shift_mlp_txt, scale_mlp_txt, gate_mlp_txt] = txt_mod_params[1];
 
+    LOG(INFO) << "scale_msa_img shape" << scale_msa_img.sizes();
+    LOG(INFO) << "shift_msa_img shape" << shift_msa_img.sizes();
+
     auto norm_hidden_states = norm1_->forward(hidden_states);
     // norm_hidden_states = (1 + scale_msa_img.unsqueeze({0, 1})) *
     // norm_hidden_states + shift_msa_img.unsqueeze({0, 1});
     norm_hidden_states =
-        (1 + scale_msa_img.unsqueeze(0).unsqueeze(1)) * norm_hidden_states +
-        shift_msa_img.unsqueeze(0).unsqueeze(1);
+        (1 + scale_msa_img) * norm_hidden_states + shift_msa_img;
 
     auto norm_encoder_hidden_states =
         norm1_context_->forward(encoder_hidden_states);
     // norm_encoder_hidden_states = (1 + scale_msa_txt.unsqueeze({0, 1})) *
     // norm_encoder_hidden_states + shift_msa_txt.unsqueeze({0, 1});
-    norm_encoder_hidden_states = (1 + scale_msa_txt.unsqueeze(0).unsqueeze(1)) *
-                                     norm_encoder_hidden_states +
-                                 shift_msa_txt.unsqueeze(0).unsqueeze(1);
+    norm_encoder_hidden_states =
+        (1 + scale_msa_txt) * norm_encoder_hidden_states + shift_msa_txt;
 
     auto [attn_output, context_attn_output] = attn_->forward(
         norm_hidden_states, norm_encoder_hidden_states, image_rotary_emb);
 
-    attn_output = gate_msa_img.unsqueeze(0).unsqueeze(1) * attn_output;
+    attn_output = gate_msa_img * attn_output;
     torch::Tensor new_hidden_states = hidden_states + attn_output;
 
     auto norm_hs = norm2_->forward(new_hidden_states);
-    norm_hs = norm_hs * (1 + scale_mlp_img.unsqueeze(0).unsqueeze(1)) +
-              shift_mlp_img.unsqueeze(0).unsqueeze(1);
+    norm_hs = norm_hs * (1 + scale_mlp_img) + shift_mlp_img;
     auto ff_output = ff_->forward(norm_hs);
-    new_hidden_states =
-        new_hidden_states + gate_mlp_img.unsqueeze(0).unsqueeze(1) * ff_output;
+    new_hidden_states = new_hidden_states + gate_mlp_img * ff_output;
 
-    context_attn_output =
-        gate_msa_txt.unsqueeze(0).unsqueeze(1) * context_attn_output;
+    context_attn_output = gate_msa_txt * context_attn_output;
     torch::Tensor new_encoder_hidden_states =
         encoder_hidden_states + context_attn_output;
 
     auto norm_enc_hs = norm2_context_->forward(new_encoder_hidden_states);
-    norm_enc_hs = norm_enc_hs * (1 + scale_mlp_txt.unsqueeze(0).unsqueeze(1)) +
-                  shift_mlp_txt.unsqueeze(0).unsqueeze(1);
+    norm_enc_hs = norm_enc_hs * (1 + scale_mlp_txt) + shift_mlp_txt;
     auto ff_context_out = ff_context_->forward(norm_enc_hs);
     new_encoder_hidden_states =
-        new_encoder_hidden_states +
-        gate_mlp_txt.unsqueeze(0).unsqueeze(1) * ff_context_out;
+        new_encoder_hidden_states + gate_mlp_txt * ff_context_out;
 
     if (new_encoder_hidden_states.scalar_type() == torch::kFloat16) {
       new_encoder_hidden_states =
@@ -920,23 +958,34 @@ class Flux2ParallelSelfAttentionImpl : public torch::nn::Module {
 
   torch::Tensor forward(const torch::Tensor& hidden_states,
                         const torch::Tensor& image_rotary_emb) {
+    LOG(INFO) << "Flux2ParallelSelfAttentionImpl forward";
+    LOG(INFO) << "hidden_states shape" << hidden_states.sizes();
     int64_t batch_size = hidden_states.size(0);
 
     auto qkv_mlp_output = to_qkv_mlp_->forward(hidden_states);
+    LOG(INFO) << "qkv_mlp_output shape" << qkv_mlp_output.sizes();
+    auto tp_size = FLAGS_dit_tp_size ? FLAGS_dit_tp_size >= 1 : 1;
+    int64_t qkv_size = query_dim_ * 3 / tp_size;
+    int64_t mlp_size = mlp_hidden_dim_ * mlp_mult_factor_ / tp_size;
 
-    int64_t qkv_size = query_dim_ * 3;
-    int64_t mlp_size = mlp_hidden_dim_ * mlp_mult_factor_;
-
+    LOG(INFO) << "mlp size" << "mlp_size";
     auto qkv_output = qkv_mlp_output.slice(-1, 0, qkv_size);
     auto mlp_output = qkv_mlp_output.slice(-1, qkv_size, qkv_size + mlp_size);
+
+    LOG(INFO) << "qkv output shape" << qkv_output.sizes();
+    LOG(INFO) << "mlp output shape" << mlp_output.sizes();
 
     auto q = qkv_output.slice(-1, 0, query_dim_);
     auto k = qkv_output.slice(-1, query_dim_, query_dim_ * 2);
     auto v = qkv_output.slice(-1, query_dim_ * 2, query_dim_ * 3);
 
+    LOG(INFO) << "q shape" << q.sizes();
+    LOG(INFO) << "k shape" << k.sizes();
+    LOG(INFO) << "v shape" << v.sizes();
+
     int64_t inner_dim = k.size(-1);
-    int64_t attn_heads = heads_;
-    int64_t head_dim = inner_dim / attn_heads;
+    int64_t attn_heads = inner_dim / head_dim_;
+    int64_t head_dim = head_dim_;
 
     q = q.view({batch_size, -1, attn_heads, head_dim});
     k = k.view({batch_size, -1, attn_heads, head_dim});
@@ -949,6 +998,10 @@ class Flux2ParallelSelfAttentionImpl : public torch::nn::Module {
       q = apply_rotary_emb(q, image_rotary_emb, false);
       k = apply_rotary_emb(k, image_rotary_emb, false);
     }
+
+    LOG(INFO) << "after image rotary";
+    LOG(INFO) << "q shape" << q.sizes();
+    LOG(INFO) << "k shape" << k.sizes();
 
 #if defined(USE_NPU)
     int64_t head_num_ = q.size(2);
@@ -969,6 +1022,9 @@ class Flux2ParallelSelfAttentionImpl : public torch::nn::Module {
     auto attn_output = std::get<0>(results);
 
     attn_output = attn_output.reshape({batch_size, -1, attn_heads * head_dim});
+
+    LOG(INFO) << "after output attn_output" << attn_output.sizes();
+
 #elif defined(USE_CUDA)
     q = q.transpose(1, 2);
     k = k.transpose(1, 2);
@@ -981,12 +1037,16 @@ class Flux2ParallelSelfAttentionImpl : public torch::nn::Module {
 #else
     NOT_IMPLEMENTED();
 #endif
-
+    LOG(INFO) << "mlp_output shape" << mlp_output.sizes();
     mlp_output = mlp_act_fn_(mlp_output);
-
+    LOG(INFO) << "after act mlp shape" << mlp_output.sizes();
     auto output =
         torch::cat(std::vector<torch::Tensor>{attn_output, mlp_output}, -1);
+    LOG(INFO) << "after cat, output shape" << output.sizes();
+
     output = to_out_->forward(output);
+
+    LOG(INFO) << "after output shape" << output.sizes();
 
     return output;
   }
@@ -1019,6 +1079,7 @@ class Flux2ParallelSelfAttentionImpl : public torch::nn::Module {
             {q_weight_rank, k_weight_rank, v_weight_rank, mlp_weight_rank}, 0);
 
         // Directly set the weight instead of using load_state_dict
+        LOG(INFO) << "rank_weight shape" << rank_weight.sizes();
         to_qkv_mlp_->set_weight(rank_weight);
       } else {
         // Directly set the weight instead of using load_state_dict

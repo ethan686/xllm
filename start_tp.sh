@@ -65,5 +65,6 @@ do
     --enable_schedule_overlap=false \
     --use_contiguous_input_buffer=false \
     --dit_debug_print=true \
+    --enable-shm=true \
     --node_rank=$i > $LOG_FILE 2>&1 &
 done
