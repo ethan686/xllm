@@ -964,7 +964,7 @@ class Flux2ParallelSelfAttentionImpl : public torch::nn::Module {
 
     auto qkv_mlp_output = to_qkv_mlp_->forward(hidden_states);
     LOG(INFO) << "qkv_mlp_output shape" << qkv_mlp_output.sizes();
-    auto tp_size = FLAGS_dit_tp_size ? FLAGS_dit_tp_size >= 1 : 1;
+    auto tp_size = FLAGS_dit_tp_size >= 1 ? FLAGS_dit_tp_size : 1;
     int64_t qkv_size = query_dim_ * 3 / tp_size;
     int64_t mlp_size = mlp_hidden_dim_ * mlp_mult_factor_ / tp_size;
 
@@ -975,9 +975,9 @@ class Flux2ParallelSelfAttentionImpl : public torch::nn::Module {
     LOG(INFO) << "qkv output shape" << qkv_output.sizes();
     LOG(INFO) << "mlp output shape" << mlp_output.sizes();
 
-    auto q = qkv_output.slice(-1, 0, query_dim_);
-    auto k = qkv_output.slice(-1, query_dim_, query_dim_ * 2);
-    auto v = qkv_output.slice(-1, query_dim_ * 2, query_dim_ * 3);
+    auto q = qkv_output.slice(-1, 0, qkv_size / 3);
+    auto k = qkv_output.slice(-1, qkv_size / 3, (qkv_size * 2) / 3);
+    auto v = qkv_output.slice(-1, (qkv_size * 2) / 3, qkv_size);
 
     LOG(INFO) << "q shape" << q.sizes();
     LOG(INFO) << "k shape" << k.sizes();
