@@ -168,7 +168,9 @@ class Flux2PosEmbedImpl : public torch::nn::Module {
 
     if (height != cached_image_height_ || width != cached_image_width_ ||
         seq_len != max_seq_len_) {
-      torch::Tensor ids = torch::cat({txt_ids, img_ids}, 1);  // 已修�~T�
+      LOG(INFO) << "before cat txt_ids shape, img_ids shape" << txt_ids.sizes()
+                << img_ids.sizes();
+      torch::Tensor ids = torch::cat({txt_ids, img_ids}, 1);
       LOG(INFO) << "----------concat.ids" << ids.sizes();
       cached_image_height_ = height;
       cached_image_width_ = width;
@@ -180,7 +182,33 @@ class Flux2PosEmbedImpl : public torch::nn::Module {
     }
     return {freqs_cos_cache_, freqs_sin_cache_};
   }
+  /*
+    std::pair<torch::Tensor, torch::Tensor> forward(const torch::Tensor& ids) {
+      int64_t n_axes = axes_dim_.size();
+      std::vector<torch::Tensor> cos_out, sin_out;
+      auto pos = ids.to(torch::kFloat32);
+      torch::Dtype freqs_dtype = torch::kFloat64;
+      for (int64_t i = 0; i < n_axes; ++i) {
+        auto pos_slice = pos.select(-1, i);
+        auto result = get_1d_rotary_pos_embed(axes_dim_[i],
+                                              pos_slice,
+                                              theta_,
+                                              true,  // repeat_interleave_real
+                                              1,
+                                              1,
+                                              true,  // use_real
+                                              freqs_dtype);
+        auto cos = result[0];
+        auto sin = result[1];
+        cos_out.push_back(cos);
+        sin_out.push_back(sin);
+      }
 
+      auto freqs_cos = torch::cat(cos_out, -1);
+      auto freqs_sin = torch::cat(sin_out, -1);
+      return {freqs_cos, freqs_sin};
+    }
+  */
   std::pair<torch::Tensor, torch::Tensor> forward(const torch::Tensor& ids) {
     int64_t n_axes = axes_dim_.size();
     std::vector<torch::Tensor> cos_out, sin_out;
