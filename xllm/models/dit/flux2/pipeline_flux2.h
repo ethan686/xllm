@@ -50,7 +50,7 @@ class Flux2PipelineImpl : public Flux2PipelineBaseImpl {
     transformer_ = Flux2DiTModel(context.get_model_context("transformer"),
                                  context.get_parallel_args());
     // mistral3_ =
-    // Mistral3EncoderModel(context.get_model_context("text_encoder"));
+    // Mistral3ForConditionalGeneration(context.get_model_context("text_encoder"));
     scheduler_ =
         FlowMatchEulerDiscreteScheduler(context.get_model_context("scheduler"));
     register_module("vae", vae_);
