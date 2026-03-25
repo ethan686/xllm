@@ -40,6 +40,7 @@ namespace xllm {
 namespace {
 constexpr size_t kDecoderBosTokenCount = 1;
 constexpr size_t kDecoderMaxTokenCount = kRecTotalSteps + kDecoderBosTokenCount;
+constexpr char kEmptyLogprobsFinishReason[] = "empty_logprobs";
 }  // namespace
 
 const std::string Sequence::ENCODER_SPARSE_EMBEDDING_NAME = "sparse_embedding";
@@ -186,6 +187,7 @@ Sequence::Sequence(const Sequence& other)
       cur_generated_token_idx_(other.cur_generated_token_idx_),
       first_token_(other.first_token_),
       is_pre_scheduled_step_prefill_(other.is_pre_scheduled_step_prefill_),
+      updated_since_last_beam_search_(other.updated_since_last_beam_search_),
       termination_flag_(std::make_shared<std::atomic<int32_t>>(INT32_MAX)) {
   logprob_state_ = std::make_unique<LogprobState>(*other.logprob_state_);
 }
@@ -246,6 +248,7 @@ void Sequence::append_token(const Token& token) {
 
   // invalidate the finish status once a new token is appended
   finish_status_invalidated_ = true;
+  updated_since_last_beam_search_ = true;
 }
 
 void Sequence::update_last_step_token(const Token& token, size_t token_offset) {
@@ -258,6 +261,13 @@ void Sequence::update_last_step_token(const Token& token, size_t token_offset) {
 
   // for mtp, currently only support multi-nodes task.
   if (token_offset > 0) {
+    // Skip MTP token processing if sequence has no KV cache blocks.
+    // This happens when the sequence was preempted during schedule_request(),
+    // causing its KV cache to be deallocated (reset), but it's still in
+    // last_batch_ being processed by update_last_step_result().
+    if (kv_state_.num_kv_blocks() == 0) {
+      return;
+    }
     kv_state_.incr_kv_cache_tokens_num(1);
     num_tokens_++;
     // when enable speculative decoding, fake token id will be covered.
@@ -280,6 +290,7 @@ void Sequence::update_last_step_token(const Token& token, size_t token_offset) {
   }
   ++cur_generated_token_idx_;
   finish_status_invalidated_ = true;
+  updated_since_last_beam_search_ = true;
 }
 
 void Sequence::update_token(size_t index, const Token& token) {
@@ -413,6 +424,41 @@ SequenceOutput Sequence::generate_output() {
   }
 
   return output;
+}
+
+void Sequence::generate_sample_outputs(std::vector<SequenceOutput>& outputs,
+                                       const Tokenizer& tokenizer) {
+  const auto& slots = sample_slots();
+  if (slots.empty()) {
+    outputs.push_back(generate_output(tokenizer));
+    return;
+  }
+
+  outputs.reserve(outputs.size() + slots.size());
+  for (size_t slot_idx = 0; slot_idx < slots.size(); ++slot_idx) {
+    SequenceOutput output;
+    output.index = slots[slot_idx].sample_id;
+
+    const size_t token_idx = num_prompt_tokens_ + slot_idx;
+    if (token_idx >= num_tokens_ || tokens_[token_idx] < 0) {
+      output.finish_reason = kEmptyLogprobsFinishReason;
+      outputs.push_back(std::move(output));
+      continue;
+    }
+
+    output.token_ids.push_back(tokens_[token_idx]);
+    generate_output_tokens_logprobs(
+        token_idx, token_idx + 1, tokenizer, output.logprobs);
+    if (!output.logprobs.has_value() || output.logprobs->empty()) {
+      output.token_ids.clear();
+      output.finish_reason = kEmptyLogprobsFinishReason;
+      outputs.push_back(std::move(output));
+      continue;
+    }
+
+    output.text = output.logprobs->front().token;
+    outputs.push_back(std::move(output));
+  }
 }
 
 SequenceOutputType Sequence::output_type() {
@@ -587,8 +633,12 @@ int64_t Sequence::tbt(const absl::Time& now) {
   return latency;
 }
 
-float Sequence::get_average_logprob() {
-  return logprob_state_->get_average_logprob(num_tokens_);
+float Sequence::get_acc_logprob() {
+  return logprob_state_->get_acc_logprob(num_tokens_);
+}
+
+float Sequence::get_base_logprob() {
+  return logprob_state_->get_base_logprob(num_tokens_);
 }
 
 void Sequence::generate_output_tokens_logprobs(
@@ -655,6 +705,13 @@ void Sequence::finish() {
   if (finish_reason_ == FinishReason::NONE) {
     finish_reason_ = FinishReason::STOP;
   }
+}
+
+void Sequence::reset_finish_state_for_beam_search() {
+  finished_ = false;
+  finish_reason_ = FinishReason::NONE;
+  finish_status_invalidated_ = true;
+  finished();
 }
 
 }  // namespace xllm
