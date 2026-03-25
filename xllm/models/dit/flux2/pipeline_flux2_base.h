@@ -253,55 +253,149 @@ class Flux2PipelineBaseImpl : public torch::nn::Module {
       int64_t max_sequence_length = 512,
       const std::vector<int64_t>& hidden_states_layers = {10, 20, 30},
       const std::string& system_message = SYSTEM_MESSAGE) {
+// ===================== 1. 前置检查 =====================
+    CHECK(tokenizer_ != nullptr) << "Tokenizer not initialized!";
+    CHECK(!mistral3_.is_empty()) << "Mistral3 model not loaded!";
+    if (prompt.empty()) {
+        LOG(WARNING) << "Empty prompt list, using empty string as default";
+        prompt = {""};
+    }
     int64_t batch_size = prompt.size();
 
+    // ===================== 2. 格式化Prompt =====================
     auto messages_batch = format_input(prompt, system_message);
-
     std::vector<std::string> formatted_prompts;
     formatted_prompts.reserve(batch_size);
 
-    /*for (const auto& messages : messages_batch) {
-      auto formatted = chat_template_->apply(messages);
-      if (!formatted.has_value()) {
-        throw std::runtime_error("Failed to apply chat template");
-      }
-      formatted_prompts.push_back(formatted.value());
-    }*/
-
-    std::vector<std::vector<int32_t>> text_input_ids;
-    text_input_ids.reserve(batch_size);
-    CHECK(tokenizer_->batch_encode(formatted_prompts, &text_input_ids));
-    for (auto& ids : text_input_ids) {
-      ids.resize(max_sequence_length, 0);
+    for (const auto& messages : messages_batch) {
+        auto formatted = apply_chat_template(messages);
+        if (!formatted.has_value()) {
+            throw std::runtime_error("Failed to apply Mistral3 chat template");
+        }
+        formatted_prompts.push_back(formatted.value());
     }
 
-    std::vector<int32_t> text_input_ids_flat;
-    text_input_ids_flat.reserve(batch_size * max_sequence_length);
-    for (const auto& ids : text_input_ids) {
-      text_input_ids_flat.insert(
-          text_input_ids_flat.end(), ids.begin(), ids.end());
+    // ===================== 3. 生成Mistral3格式Input ID =====================
+    // 3.1 批量编码
+    std::vector<std::vector<int32_t>> batch_token_ids;
+    batch_token_ids.reserve(prompt.size());
+    CHECK(tokenizer_->batch_encode(formatted_prompts, &batch_token_ids)) 
+        << "Mistral3 tokenizer batch encode failed!";
+
+    // 3.2 确定PAD Token ID
+    int32_t pad_token_id = MISTRAL3_DEFAULT_PAD_ID;
+    const auto& text_encoder_args = context_.get_model_args("text_encoder");
+    if (text_encoder_args.pad_token_id() > 0) {
+        pad_token_id = text_encoder_args.pad_token_id();
+    } else if (auto eot_id = tokenizer_->token_to_id("<|endoftext|>"); eot_id.has_value()) {
+        pad_token_id = eot_id.value();
     }
-    auto input_ids =
-        torch::tensor(text_input_ids_flat, torch::dtype(torch::kLong))
-            .view({batch_size, max_sequence_length})
-            .to(options_.device());
 
-    // auto hidden_states_output =
-    // mistral3_->forward_with_hidden_states(input_ids, hidden_states_layers);
-    auto hidden_states_output =
-        torch::empty({1, 512, 256, 768}, torch::kFloat32);
-    int64_t num_channels = hidden_states_output.size(1);
-    int64_t seq_len = hidden_states_output.size(2);
-    int64_t hidden_dim = hidden_states_output.size(3);
+    // 3.3 截断/填充（左对齐，末尾PAD）
+    std::vector<int32_t> input_ids_flat;
+    std::vector<int64_t> orig_seq_lens;
+    input_ids_flat.reserve(batch_size * max_sequence_length);
+    orig_seq_lens.reserve(batch_size);
 
-    auto prompt_embeds =
-        hidden_states_output.permute({0, 2, 1, 3})
-            .reshape({batch_size, seq_len, num_channels * hidden_dim});
+    for (auto& token_ids : batch_token_ids) {
+        int64_t orig_len = token_ids.size();
+        orig_seq_lens.push_back(orig_len);
 
+        if (orig_len > max_sequence_length) {
+            LOG(WARNING) << "Prompt truncated from " << orig_len << " to " << max_sequence_length;
+            token_ids.resize(max_sequence_length);
+            orig_len = max_sequence_length;
+        }
+        int64_t pad_len = max_sequence_length - orig_len;
+        if (pad_len > 0) {
+            token_ids.insert(token_ids.end(), pad_len, pad_token_id);
+        }
+        input_ids_flat.insert(input_ids_flat.end(), token_ids.begin(), token_ids.end());
+    }
+
+    // 3.4 构建1D Input ID张量（Mistral3 forward要求）
+    torch::Tensor tokens = torch::tensor(input_ids_flat, torch::kLong).to(options_.device());
+
+    // ===================== 4. 生成Mistral3格式Attention Mask =====================
+    // 4.1 生成1D扁平mask
+    std::vector<int32_t> attn_mask_flat;
+    std::vector<int> q_seq_lens_vec, kv_seq_lens_vec;
+    attn_mask_flat.reserve(batch_size * max_sequence_length);
+    q_seq_lens_vec.reserve(batch_size);
+    kv_seq_lens_vec.reserve(batch_size);
+
+    for (int64_t b = 0; b < batch_size; ++b) {
+        int64_t orig_len = orig_seq_lens[b];
+        for (int64_t j = 0; j < max_sequence_length; ++j) {
+            attn_mask_flat.push_back(j < orig_len ? 1 : 0);
+        }
+        q_seq_lens_vec.push_back(static_cast<int>(max_sequence_length));
+        kv_seq_lens_vec.push_back(static_cast<int>(max_sequence_length));
+    }
+
+    torch::Tensor attention_mask = torch::tensor(attn_mask_flat, torch::kLong)
+        .view({batch_size, max_sequence_length})
+        .to(options_.device());
+
+    // ===================== 5. 生成Position张量（适配Mistral3 RoPE） =====================
+    auto mask_flat = attention_mask.view({-1});
+    auto positions_1d = mask_flat.to(torch::kInt64).cumsum(-1) - 1;
+    positions_1d = positions_1d.masked_fill(mask_flat == 0, 1);
+    torch::Tensor positions = positions_1d.to(options_.device());
+
+    // ===================== 6. 构建ModelInputParams（适配Chunked Prefill） =====================
+    ModelInputParams input_params;
+    input_params.q_max_seq_len = max_sequence_length;
+    input_params.kv_max_seq_len = max_sequence_length;
+    input_params.batch_forward_type = BatchForwardType::PREFILL;
+    input_params.num_sequences = static_cast<int>(batch_size);
+    input_params.q_seq_lens_vec = q_seq_lens_vec;
+    input_params.kv_seq_lens_vec = kv_seq_lens_vec;
+
+    // 构建累积序列长度张量
+    std::vector<int> cu_seq_lens = {0};
+    int cum_len = 0;
+    for (int len : q_seq_lens_vec) {
+        cum_len += len;
+        cu_seq_lens.push_back(cum_len);
+    }
+    input_params.q_seq_lens = torch::tensor(cu_seq_lens, torch::kInt).to(tokens.device());
+    input_params.kv_seq_lens = input_params.q_seq_lens;
+
+    // 传递Attention Mask
+    input_params.graph_buffer.attn_mask = attention_mask.view({-1}).to(torch::kFloat32);
+    input_params.input_embedding = torch::Tensor();
+
+    // ===================== 7. 生成KV Cache =====================
+    std::vector<KVCache> kv_caches;
+    int64_t num_layers = text_encoder_args.n_layers();
+    kv_caches.reserve(num_layers);
+    for (int64_t i = 0; i < num_layers; ++i) {
+        kv_caches.emplace_back(torch::Tensor(), torch::Tensor());
+    }
+
+    // ===================== 8. 调用Mistral3 Forward =====================
+    ModelOutput model_output = mistral3_->forward(tokens, positions, kv_caches, input_params);
+    torch::Tensor hidden_states_flat = model_output.hidden_states;
+
+    // ===================== 9. 处理输出Embedding =====================
+    CHECK(hidden_states_flat.dim() == 2) << "Mistral3 forward output must be 2D [total_seq_len, hidden_size]";
+    int64_t hidden_size = hidden_states_flat.size(-1);
+
+    // 重塑为[batch_size, max_sequence_length, hidden_size]
+    torch::Tensor hidden_states = hidden_states_flat.view({
+        batch_size, max_sequence_length, hidden_size
+    });
+
+    // 适配多图生成
+    auto prompt_embeds = hidden_states.reshape({batch_size, max_sequence_length, hidden_size});
     prompt_embeds = prompt_embeds.repeat({1, num_images_per_prompt, 1});
-    prompt_embeds =
-        prompt_embeds.view({batch_size * num_images_per_prompt, seq_len, -1});
-    return prompt_embeds;
+    prompt_embeds = prompt_embeds.view({
+        batch_size * num_images_per_prompt, max_sequence_length, hidden_size
+    });
+
+    // ===================== 10. 返回最终Embedding =====================
+    return prompt_embeds.to(options_);
   }
 
   torch::Tensor prepare_text_ids(const torch::Tensor& prompt_embeds) {
