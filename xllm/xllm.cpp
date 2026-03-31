@@ -31,6 +31,7 @@ limitations under the License.
 #include "core/common/metrics.h"
 #include "core/common/options.h"
 #include "core/common/types.h"
+#include "core/distributed_runtime/dit_master.h"
 #include "core/distributed_runtime/master.h"
 #include "core/framework/xtensor/global_xtensor.h"
 #include "core/framework/xtensor/options.h"
@@ -55,6 +56,67 @@ void shutdown_handler(int signal) {
   // TODO: gracefully shutdown the server
   LOG(WARNING) << "Received signal " << signal << ", stopping server...";
   exit(1);
+}
+
+std::string get_model_type(const std::filesystem::path& model_path) {
+  JsonReader reader;
+  // for llm, vlm and rec models, the config.json file is in the model path
+  std::filesystem::path config_json_path = model_path / "config.json";
+  std::filesystem::path model_index_json_path = model_path / "model_index.json";
+
+  if (std::filesystem::exists(config_json_path)) {
+    reader.parse(config_json_path);
+    // Prefer model_type (e.g. LLM/VLM); fall back to model_name for configs
+    // that only have model_name (e.g. LongCat-Image: {"model_name":
+    // "LongCat-Image"}).
+    auto model_type = reader.value<std::string>("model_type");
+    if (!model_type.has_value()) {
+      model_type = reader.value<std::string>("model_name");
+    }
+    if (!model_type.has_value()) {
+      LOG(FATAL) << "Please check config.json file in model path: "
+                 << model_path
+                 << ", it should contain model_type or model_name key.";
+    }
+    return model_type.value();
+  } else if (std::filesystem::exists(model_index_json_path)) {
+    reader.parse(model_index_json_path);
+    auto model_type = reader.value<std::string>("_class_name");
+    if (!model_type.has_value()) {
+      LOG(FATAL) << "Please check model_index.json file in model path: "
+                 << model_path << ", it should contain _class_name key";
+    }
+    return model_type.value();
+
+  } else {
+    LOG(FATAL) << "Please check config.json or model_index.json file, one of "
+                  "them should exist in the model path: "
+               << model_path;
+  }
+  return "";
+}
+
+std::string get_model_backend(const std::filesystem::path& model_path) {
+  JsonReader reader;
+  // for dit models, the model_index.json file is in the model path
+  std::filesystem::path model_index_json_path = model_path / "model_index.json";
+
+  if (std::filesystem::exists(model_index_json_path)) {
+    reader.parse(model_index_json_path);
+
+    if (reader.value<std::string>("_diffusers_version").has_value()) {
+      return "dit";
+    } else {
+      LOG(FATAL) << "Please check model_index.json file in model path: "
+                 << model_path << ", it should contain _diffusers_version key.";
+    }
+  }
+
+  // for llm, vlm and rec models, get backend from model type
+  std::string model_type = xllm::get_model_type(model_path);
+  // model_type always exists since get_model_type() will log fatal error if
+  // model_type is empty
+  return ModelRegistry::get_model_backend(model_type);
 }
 
 void validate_flags(const std::string& model_type) {
@@ -226,6 +288,10 @@ int run() {
       .dp_size(FLAGS_dp_size)
       .cp_size(FLAGS_cp_size)
       .ep_size(FLAGS_ep_size)
+      .dit_dp_size(FLAGS_dit_dp_size)
+      .dit_tp_size(FLAGS_dit_tp_size)
+      .dit_sp_size(FLAGS_dit_sp_size)
+      .dit_cfg_size(FLAGS_dit_cfg_size)
       .instance_name(FLAGS_host + ":" + std::to_string(FLAGS_port))
       .enable_disagg_pd(FLAGS_enable_disagg_pd)
       .enable_pd_ooc(FLAGS_enable_pd_ooc)
@@ -307,7 +373,11 @@ int run() {
   std::unique_ptr<Master> master;
   // working node
   if (options.node_rank() != 0) {
-    master = std::make_unique<LLMAssistantMaster>(options);
+    if (FLAGS_backend == "dit") {
+      master = std::make_unique<DiTAssistantMaster>(options);
+    } else {
+      master = std::make_unique<LLMAssistantMaster>(options);
+    }
   } else {
     if (FLAGS_random_seed < 0) {
       FLAGS_random_seed = std::random_device{}() % (1 << 30);
