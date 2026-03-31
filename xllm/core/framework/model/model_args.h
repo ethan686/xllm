@@ -403,6 +403,22 @@ struct ModelArgs {
   PROPERTY(bool, guidance_embeds) = true;
   PROPERTY(std::vector<int64_t>, axes_dims_rope) = {};
   PROPERTY(int64_t, num_single_layers) = 0;
+  PROPERTY(float, mlp_ratio) = 3.0f;
+  PROPERTY(int, timestep_guidance_channels) = 256;
+  PROPERTY(double, eps) = 1e-6;
+  PROPERTY(int64_t, patch_size) = 1;
+  PROPERTY(std::vector<int64_t>, wan_patch_size) = { 1, 2, 2 };
+  PROPERTY(bool, cross_attn_norm) = true;
+  PROPERTY(int64_t, ffn_dim) = 13824;
+  PROPERTY(int64_t, time_freq_dim) = 256;
+  PROPERTY(int64_t, in_channels) = 36;
+  PROPERTY(int64_t, out_channels) = 16;
+  PROPERTY(std::string, qk_norm) = "rms_norm_across_heads";
+  PROPERTY(int64_t, rope_max_seq_len) = 1024;
+  PROPERTY(int64_t, text_embed_dim) = 4096;
+  PROPERTY(int64_t, image_embed_dim) = -1;
+  PROPERTY(int64_t, added_kv_proj_dim) = -1;
+  PROPERTY(int64_t, pos_embed_seq_len) = -1;
 
   // t5 related args
   PROPERTY(int64_t, d_model) = 0;
@@ -423,6 +439,31 @@ struct ModelArgs {
   PROPERTY(int64_t, base_image_seq_len) = 0;
   PROPERTY(int64_t, max_image_seq_len) = 0;
   PROPERTY(float, shift_terminal) = 0;
+  PROPERTY(float, beta_start) = 0.0001f;
+  PROPERTY(float, beta_end) = 0.02f;
+  PROPERTY(std::string, beta_schedule) = "linear";
+  PROPERTY(std::vector<float>, trained_betas) = {};
+  PROPERTY(int64_t, solver_order) = 2;
+  PROPERTY(std::string, prediction_type) = "flow_prediction";
+  PROPERTY(bool, thresholding) = false;
+  PROPERTY(float, dynamic_thresholding_ratio) = 0.995f;
+  PROPERTY(float, sample_max_value) = 1.0f;
+  PROPERTY(bool, predict_x0) = true;
+  PROPERTY(std::string, solver_type) = "bh2";
+  PROPERTY(bool, lower_order_final) = true;
+  PROPERTY(std::vector<int64_t>, disable_corrector) = {};
+  PROPERTY(bool, use_karras_sigmas) = false;
+  PROPERTY(bool, use_exponential_sigmas) = false;
+  PROPERTY(bool, use_beta_sigmas) = false;
+  PROPERTY(bool, use_flow_sigmas) = true;
+  PROPERTY(float, flow_shift) = 3.0f;
+  PROPERTY(std::string, timestep_spacing) = "linspace";
+  PROPERTY(int64_t, steps_offset) = 0;
+  PROPERTY(std::string, final_sigmas_type) = "zero";
+  PROPERTY(bool, rescale_betas_zero_snr) = false;
+  PROPERTY(std::string, time_shift_type) = "exponential";
+  PROPERTY(float, sigma_min) = 0.0f;
+  PROPERTY(float, sigma_max) = 0.0f;
 
   // qwen_image_edit_2509 vae related args
   PROPERTY(int64_t, base_dim) = 0;

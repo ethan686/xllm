@@ -56,16 +56,19 @@ torch::Tensor randn_tensor(const std::vector<int64_t>& shape,
 
 class VAEImageProcessorImpl : public torch::nn::Module {
  public:
-  explicit VAEImageProcessorImpl(ModelContext context,
-                                 bool do_resize = true,
-                                 bool do_normalize = true,
-                                 bool do_binarize = false,
-                                 bool do_convert_rgb = false,
-                                 bool do_convert_grayscale = false,
-                                 int64_t latent_channels = 4) {
+  explicit VAEImageProcessorImpl(
+      ModelContext context,
+      bool do_resize = true,
+      bool do_normalize = true,
+      bool do_binarize = false,
+      bool do_convert_rgb = false,
+      bool do_convert_grayscale = false,
+      int64_t latent_channels = 4 int64_t scale_factor = -1) {
     const auto& model_args = context.get_model_args();
     options_ = context.get_tensor_options();
-    scale_factor_ = 1 << model_args.block_out_channels().size();
+    scale_factor_ = scale_factor == -1
+                        ? (1 << model_args.block_out_channels().size())
+                        : scale_factor;
     latent_channels_ = latent_channels;
     do_resize_ = do_resize;
     do_normalize_ = do_normalize;
