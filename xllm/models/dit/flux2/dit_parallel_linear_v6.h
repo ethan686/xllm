@@ -72,6 +72,7 @@ struct TpOptions {
   int64_t tp_size = 1;
   bool gather_output = false;
   bool need_scatter = false;
+  bool is_save = false;
   ProcessGroup* process_group = nullptr;
 
   TpOptions() = default;
@@ -81,12 +82,14 @@ struct TpOptions {
             int64_t tp_size,
             bool gather_output = false,
             bool need_scatter = false,
+            bool is_save = false,
             ProcessGroup* process_group = nullptr)
       : column_parallel(column_parallel),
         tp_rank(tp_rank),
         tp_size(tp_size),
         gather_output(gather_output),
         need_scatter(need_scatter),
+        is_save(is_save),
         process_group(process_group) {}
 
   void validate() const {
@@ -138,14 +141,14 @@ class DiTParallelLinearImpl : public torch::nn::Module {
     }
   }
 
-  torch::Tensor forward(const torch::Tensor& input) {
+  torch::Tensor forward(const torch::Tensor& input, bool if_save = false) {
     switch (linear_type_) {
       case LinearType::Default:
         return forward_default(input);
       case LinearType::SequenceParallel:
         return forward_sequence_parallel(input);
       case LinearType::TensorParallel:
-        return forward_tensor_parallel(input);
+        return forward_tensor_parallel(input, if_save);
       default:
         LOG(FATAL) << "Unknown LinearType: " << static_cast<int>(linear_type_);
         return input;
@@ -173,9 +176,12 @@ class DiTParallelLinearImpl : public torch::nn::Module {
   }
 
   // Directly set the weight tensor
+  torch::Tensor get_weight() const { return weight_; }
+
   void set_weight(const torch::Tensor& weight) {
     if (linear_type_ == LinearType::TensorParallel) {
       weight_ = weight;
+      weight.to(options_);
       weight_is_loaded_ = true;
     } else {
       // For default and sequence parallel, we need to set weight through
@@ -262,7 +268,8 @@ class DiTParallelLinearImpl : public torch::nn::Module {
     }
   }
 
-  torch::Tensor forward_tensor_parallel(const torch::Tensor& input) {
+  torch::Tensor forward_tensor_parallel(const torch::Tensor& input,
+                                        bool if_save = false) {
     CHECK(input.sizes().size() == 3)
         << "TP linear input is expected to be a tensor "
         << "with shape {batch, seq_len, hidden_size}";
@@ -273,31 +280,59 @@ class DiTParallelLinearImpl : public torch::nn::Module {
     }
 
     if (options.column_parallel) {
-      return forward_column_parallel(input);
+      return forward_column_parallel(input, if_save);
     } else {
-      return forward_row_parallel(input);
+      return forward_row_parallel(input, if_save);
     }
   }
 
-  torch::Tensor forward_column_parallel(const torch::Tensor& input) {
+  torch::Tensor forward_column_parallel(const torch::Tensor& input,
+                                        bool if_save = false) {
     const auto& options = tp_options_.value();
+
+    if (!weight_is_loaded_) {
+      LOG(INFO) << "weight is not loaded for column parallel";
+    }
 
     // Use direct matmul instead of WeightTransposeAddMatmul
     auto bias = has_bias_ ? std::optional<torch::Tensor>(bias_) : std::nullopt;
     xllm::kernel::MatmulParams matmul_params;
     matmul_params.a = input;
     matmul_params.b = weight_;
+
+    LOG(INFO) << "input; device" << matmul_params.a.device();
+    LOG(INFO) << "weight device" << matmul_params.b.device();
+
+    LOG(INFO) << "************************options.tp_rank:" << options.tp_rank;
+    if (if_save) {
+      LOG(INFO) << "weight shape" << weight_.sizes();
+      torch::Tensor weight_cpu = weight_.to(torch::kCPU);
+      torch::save(weight_cpu,
+                  "/export/home/weinan5/wangshuibin/10_new_flux2_tp_xllm/"
+                  "dump_flux2_tensor/01_single_parallel_weight/rank" +
+                      std::to_string(options.tp_rank) +
+                      "/01_single_parallel_qkvmlp_weight.pt");
+      LOG(INFO) << "save the weight successfully !!!";
+    }
     matmul_params.bias = bias;
     auto output = xllm::kernel::matmul(matmul_params);
+    // LOG(INFO) << "11111111output shape" << output.sizes();
 
-    if (options.gather_output) {
-      output = parallel_state::gather(output, options.process_group, -1);
+    if (!options.process_group) {
+      LOG(INFO) << "!process_group is true!!!!!";
     }
 
+    if (options.gather_output) {
+      // LOG(INFO) << "options.gather_output" << options.gather_output;
+      output = parallel_state::gather(output, options.process_group, -1);
+      LOG(INFO) << "22222222output shape" << output.sizes();
+    }
+    LOG(INFO) << "3333333333output shape" << output.sizes();
     return output;
   }
 
-  torch::Tensor forward_row_parallel(const torch::Tensor& input) {
+  torch::Tensor forward_row_parallel(const torch::Tensor& input,
+                                     bool if_save = false) {
     const auto& options = tp_options_.value();
 
     auto scattered_input = input;
@@ -314,9 +349,35 @@ class DiTParallelLinearImpl : public torch::nn::Module {
     matmul_params.b = weight_;
     matmul_params.bias = bias;
     auto output = xllm::kernel::matmul(matmul_params);
-
     // Reduce output
+    // if (tp_options_.value().is_save) {
+    //   LOG(INFO) << "save output shape" << output.sizes();
+    //   torch::save(output,
+    //   "/export/home/weinan5/wangshuibin/10_new_flux2_tp_xllm/dump_flux2_tensor/05_cpp_double_inner_attention_tensor/rank"
+    //   + std::to_string(tp_options_.value().tp_rank) +
+    //   "/05_29_save_hidden_output_0.pt");
+    // }
+    // torch::npu::synchronize();
+    // if (if_save) {
+    //   LOG(INFO) << "Before reduce output save shape" << output.sizes();
+    //   torch::save(output,
+    //   "/export/home/weinan5/wangshuibin/10_new_flux2_tp_xllm/dump_flux2_tensor/05_cpp_double_inner_attention_tensor/rank"
+    //   + std::to_string(options.tp_rank) + "/05_29_save_hidden_output_0.pt");
+    //   // tp_options_.value().is_save = false;
+    // }
+    // Reduce output
+
+    if (!options.process_group) {
+      LOG(INFO) << "!process_group is true!!!!!";
+    }
+
     output = parallel_state::reduce(output, options.process_group);
+    // if (if_save) {
+    //   LOG(INFO) << "Reduce output save shape" << output.sizes();
+    //   torch::save(output,
+    //   "/export/home/weinan5/wangshuibin/10_new_flux2_tp_xllm/dump_flux2_tensor/05_cpp_double_inner_attention_tensor/rank"
+    //   + std::to_string(options.tp_rank) + "/05_30_save_hidden_output_0.pt");
+    // }
 
     return output;
   }

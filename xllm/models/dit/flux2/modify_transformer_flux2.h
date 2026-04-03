@@ -1367,7 +1367,7 @@ class Flux2ParallelSelfAttentionImpl : public torch::nn::Module {
           /*tp_rank=*/parallel_args_.rank_,
           /*tp_size=*/FLAGS_dit_tp_size,
           /*gather_output=*/true,
-          /*need_scatter=*/true,
+          /*need_scatter=*/false,
           /*is_save=*/false,
           /*process_group=*/parallel_args_.dit_tp_group_);
     }
@@ -1396,59 +1396,64 @@ class Flux2ParallelSelfAttentionImpl : public torch::nn::Module {
       is_save = true;
     }
     LOG(INFO) << "0000000000000 hidden_states:" << hidden_states.sizes();
-    // auto weight_qkv_and_mlp = to_qkv_mlp_->get_weight();
-    // LOG(INFO) << "weight_qkv_and_mlp shape" << weight_qkv_and_mlp.sizes();
-    // if (weight_qkv_and_mlp.defined()) {
-    //   int64_t tp_rank = parallel_args_.rank_;
-    //   int64_t tp_size = FLAGS_dit_tp_size > 1 ? FLAGS_dit_tp_size : 1;
+    auto weight_qkv_and_mlp = to_qkv_mlp_->get_weight();
+    LOG(INFO) << "weight_qkv_and_mlp shape" << weight_qkv_and_mlp.sizes();
+    if (weight_qkv_and_mlp.defined()) {
+      int64_t tp_rank = parallel_args_.rank_;
+      int64_t tp_size = FLAGS_dit_tp_size > 1 ? FLAGS_dit_tp_size : 1;
 
-    //   int64_t qkv_size = query_dim_;
-    //   int64_t mlp_size = mlp_hidden_dim_ * mlp_mult_factor_;
-    //   LOG(INFO) << "qkv_size" << qkv_size;
-    //   LOG(INFO) << "mlp_size" << mlp_size;
-    //   auto qkv_weight = weight_qkv_and_mlp.slice(0, 0, qkv_size * 3);
-    //   auto mlp_weight =
-    //       weight_qkv_and_mlp.slice(0, qkv_size * 3, qkv_size * 3 + mlp_size);
+      int64_t qkv_size = query_dim_;
+      int64_t mlp_size = mlp_hidden_dim_ * mlp_mult_factor_;
+      LOG(INFO) << "qkv_size" << qkv_size;
+      LOG(INFO) << "mlp_size" << mlp_size;
+      auto qkv_weight = weight_qkv_and_mlp.slice(0, 0, qkv_size * 3);
+      auto mlp_weight =
+          weight_qkv_and_mlp.slice(0, qkv_size * 3, qkv_size * 3 + mlp_size);
 
-    //   if (tp_size > 1) {
-    //     auto qkv_chunks = qkv_weight.chunk(3, 0);
-    //     auto q_weight = qkv_chunks[0];
-    //     auto k_weight = qkv_chunks[1];
-    //     auto v_weight = qkv_chunks[2];
-    //     LOG(INFO) << "q_weight shape" << q_weight.sizes();
-    //     LOG(INFO) << "k_weight shape" << k_weight.sizes();
-    //     LOG(INFO) << "v_weight shape" << v_weight.sizes();
-    //     LOG(INFO) << "mlp_weight shape" << mlp_weight.sizes();
-    //     torch::Tensor save_q_weight = q_weight.to(torch::kCPU);
-    //     torch::save(save_q_weight,
-    //     "/export/home/weinan5/wangshuibin/10_new_flux2_tp_xllm/dump_flux2_tensor/01_single_parallel_weight/only_qkv_and_mlp/01_01_save_q_weight_0.pt");
-    //     torch::Tensor save_k_weight = k_weight.to(torch::kCPU);
-    //     torch::save(save_k_weight,
-    //     "/export/home/weinan5/wangshuibin/10_new_flux2_tp_xllm/dump_flux2_tensor/01_single_parallel_weight/only_qkv_and_mlp/01_02_save_k_weight_0.pt");
-    //     torch::Tensor save_v_weight = v_weight.to(torch::kCPU);
-    //     torch::save(save_v_weight,
-    //     "/export/home/weinan5/wangshuibin/10_new_flux2_tp_xllm/dump_flux2_tensor/01_single_parallel_weight/only_qkv_and_mlp/01_03_save_v_weight_0.pt");
-    //     torch::Tensor save_mlp_weight = mlp_weight.to(torch::kCPU);
-    //     torch::save(save_mlp_weight,
-    //     "/export/home/weinan5/wangshuibin/10_new_flux2_tp_xllm/dump_flux2_tensor/01_single_parallel_weight/only_qkv_and_mlp/01_04_save_mlp_weight_0.pt");
+      if (tp_size > 1) {
+        auto qkv_chunks = qkv_weight.chunk(3, 0);
+        auto q_weight = qkv_chunks[0];
+        auto k_weight = qkv_chunks[1];
+        auto v_weight = qkv_chunks[2];
+        LOG(INFO) << "q_weight shape" << q_weight.sizes();
+        LOG(INFO) << "k_weight shape" << k_weight.sizes();
+        LOG(INFO) << "v_weight shape" << v_weight.sizes();
+        LOG(INFO) << "mlp_weight shape" << mlp_weight.sizes();
+        torch::Tensor save_q_weight = q_weight.to(torch::kCPU);
+        torch::save(save_q_weight,
+                    "/export/home/weinan5/wangshuibin/10_new_flux2_tp_xllm/"
+                    "dump_flux2_tensor/01_single_parallel_weight/"
+                    "only_qkv_and_mlp/01_01_save_qkv_mlp_output_0.pt");
+        torch::Tensor save_k_weight = k_weight.to(torch::kCPU);
+        torch::save(save_k_weight,
+                    "/export/home/weinan5/wangshuibin/10_new_flux2_tp_xllm/"
+                    "dump_flux2_tensor/01_single_parallel_weight/"
+                    "only_qkv_and_mlp/01_02_save_qkv_mlp_output_0.pt");
+        torch::Tensor save_v_weight = v_weight.to(torch::kCPU);
+        torch::save(save_v_weight,
+                    "/export/home/weinan5/wangshuibin/10_new_flux2_tp_xllm/"
+                    "dump_flux2_tensor/01_single_parallel_weight/"
+                    "only_qkv_and_mlp/01_03_save_qkv_mlp_output_0.pt");
+        torch::Tensor save_mlp_weight = mlp_weight.to(torch::kCPU);
+        torch::save(save_mlp_weight,
+                    "/export/home/weinan5/wangshuibin/10_new_flux2_tp_xllm/"
+                    "dump_flux2_tensor/01_single_parallel_weight/"
+                    "only_qkv_and_mlp/01_04_save_qkv_mlp_output_0.pt");
 
-    //     auto q_weight_rank = q_weight.chunk(tp_size, 0)[tp_rank];
-    //     auto k_weight_rank = k_weight.chunk(tp_size, 0)[tp_rank];
-    //     auto v_weight_rank = v_weight.chunk(tp_size, 0)[tp_rank];
-    //     auto mlp_weight_rank = mlp_weight.chunk(tp_size, 0)[tp_rank];
+        auto q_weight_rank = q_weight.chunk(tp_size, 0)[tp_rank];
+        auto k_weight_rank = k_weight.chunk(tp_size, 0)[tp_rank];
+        auto v_weight_rank = v_weight.chunk(tp_size, 0)[tp_rank];
+        auto mlp_weight_rank = mlp_weight.chunk(tp_size, 0)[tp_rank];
 
-    //     auto rank_weight = torch::cat(
-    //         {q_weight_rank, k_weight_rank, v_weight_rank, mlp_weight_rank},
-    //         0);
+        auto rank_weight = torch::cat(
+            {q_weight_rank, k_weight_rank, v_weight_rank, mlp_weight_rank}, 0);
 
-    //     // Directly set the weight instead of using load_state_dict
-    //     LOG(INFO) << "rank_weight shape" << rank_weight.sizes();
-    //     to_qkv_mlp_->set_weight(rank_weight);
-    //   }
-    // }
+        // Directly set the weight instead of using load_state_dict
+        LOG(INFO) << "rank_weight shape" << rank_weight.sizes();
+        to_qkv_mlp_->set_weight(rank_weight);
+      }
+    }
     auto qkv_mlp_output = to_qkv_mlp_->forward(hidden_states, is_save);
-
-    LOG(INFO) << "check if after the akv_mlp_output";
 
     if (flag_dit_timestep == 0 and i == 0) {
       LOG(INFO) << "-------------11111111qkv_mlp_output shape"
@@ -1606,28 +1611,7 @@ class Flux2ParallelSelfAttentionImpl : public torch::nn::Module {
 #endif
 
     attn_output = attn_output.to(q.dtype());
-    // LOG(INFO) << "attn output dtype" << attn_output.dtype();
-    // LOG(INFO) << "q dtype" << q.dtype();
-
-    if (FLAGS_dit_tp_size > 1) {
-      mlp_output = mlp_output.contiguous();
-      mlp_output =
-          parallel_state::gather(mlp_output, parallel_args_.dit_tp_group_, -1);
-
-      attn_output = attn_output.contiguous();
-      attn_output =
-          parallel_state::gather(attn_output, parallel_args_.dit_tp_group_, -1);
-    }
-
     mlp_output = mlp_act_fn_(mlp_output);
-    LOG(INFO) << "mlp output shape" << mlp_output.sizes();
-    // if (FLAGS_dit_tp_size > 1) {
-    //   LOG(INFO) << "before mlp scatter";
-    //   mlp_output = parallel_state::scatter(mlp_output,
-    //   parallel_args_.dit_tp_group_, -1);
-    // }
-
-    LOG(INFO) << "mlp output shape" << mlp_output.sizes();
     if (flag_dit_timestep == 0 and i == 0) {
       LOG(INFO) << "999999999999999single inner parallel attention attn output"
                 << attn_output.sizes();
@@ -1656,83 +1640,64 @@ class Flux2ParallelSelfAttentionImpl : public torch::nn::Module {
         torch::cat(std::vector<torch::Tensor>{attn_output, mlp_output}, -1);
 
     output = to_out_->forward(output);
-    if (flag_dit_timestep == 0 and i == 0) {
-      LOG(INFO) << "11-11-11-11-11single inner parallel attention final output"
-                << output.sizes();
-      torch::Tensor save_output = output.to(torch::kCPU);
-      // LOG(INFO) << "-------------parallel_args_.rank_:" <<
-      // parallel_args_.rank_;
-      torch::save(save_output,
-                  "/export/home/weinan5/wangshuibin/10_new_flux2_tp_xllm/"
-                  "dump_flux2_tensor/"
-                  "08_cpp_single_inner_parallelattention_tensor/rank" +
-                      std::to_string(parallel_args_.rank_) +
-                      "/08_11_save_output_0.pt");
-    }
+    // if (flag_dit_timestep == 0 and i == 0){
+    //   LOG(INFO) << "11-11-11-11-11single inner parallel attention final
+    //   output" << output.sizes(); torch::Tensor save_output =
+    //   output.to(torch::kCPU);
+    //   // LOG(INFO) << "-------------parallel_args_.rank_:" <<
+    //   parallel_args_.rank_; torch::save(save_output,
+    //   "/export/home/weinan5/wangshuibin/10_new_flux2_tp_xllm/dump_flux2_tensor/08_cpp_single_inner_parallelattention_tensor/rank"
+    //   + std::to_string(parallel_args_.rank_) + "/08_11_save_output_0.pt");
+    // }
 
     return output;
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    LOG(INFO) << "attention load state dict";
-    auto fused_weight = state_dict.get_tensor("to_qkv_mlp_proj.weight");
-    // to_qkv_mlp_->load_state_dict(state_dict.get_dict_with_prefix("to_qkv_mlp_proj."));
-    if (fused_weight.defined()) {
-      LOG(INFO) << "attention fused weight defined";
-      int64_t tp_rank = parallel_args_.rank_;
-      int64_t tp_size = FLAGS_dit_tp_size > 1 ? FLAGS_dit_tp_size : 1;
+    // auto fused_weight = state_dict.get_tensor("to_qkv_mlp_proj.");
+    to_qkv_mlp_->load_state_dict(
+        state_dict.get_dict_with_prefix("to_qkv_mlp_proj."));
+    // if (fused_weight.defined()) {
+    //   int64_t tp_rank = parallel_args_.rank_;
+    //   int64_t tp_size = FLAGS_dit_tp_size > 1 ? FLAGS_dit_tp_size : 1;
 
-      int64_t qkv_size = query_dim_;
-      int64_t mlp_size = mlp_hidden_dim_ * mlp_mult_factor_;
+    //   int64_t qkv_size = query_dim_;
+    //   int64_t mlp_size = mlp_hidden_dim_ * mlp_mult_factor_;
 
-      auto qkv_weight = fused_weight.slice(0, 0, qkv_size * 3);
-      auto mlp_weight =
-          fused_weight.slice(0, qkv_size * 3, qkv_size * 3 + mlp_size);
-      LOG(INFO) << "tp_size" << tp_size;
-      if (tp_size > 1) {
-        auto qkv_chunks = qkv_weight.chunk(3, 0);
-        auto q_weight = qkv_chunks[0];
-        auto k_weight = qkv_chunks[1];
-        auto v_weight = qkv_chunks[2];
+    //   auto qkv_weight = fused_weight.slice(0, 0, qkv_size * 3);
+    //   auto mlp_weight =
+    //       fused_weight.slice(0, qkv_size * 3, qkv_size * 3 + mlp_size);
 
-        auto q_weight_rank = q_weight.chunk(tp_size, 0)[tp_rank];
-        auto k_weight_rank = k_weight.chunk(tp_size, 0)[tp_rank];
-        auto v_weight_rank = v_weight.chunk(tp_size, 0)[tp_rank];
-        auto mlp_weight_rank = mlp_weight.chunk(tp_size, 0)[tp_rank];
+    //   if (tp_size > 1) {
+    //     auto qkv_chunks = qkv_weight.chunk(3, 0);
+    //     auto q_weight = qkv_chunks[0];
+    //     auto k_weight = qkv_chunks[1];
+    //     auto v_weight = qkv_chunks[2];
 
-        auto rank_weight =
-            torch::cat(
-                {q_weight_rank, k_weight_rank, v_weight_rank, mlp_weight_rank},
-                0)
-                .to(options_);
-        rank_weight.to("npu");  // to(options_);
-        LOG(INFO) << "options device" << options_.device();
-        LOG(INFO) << "rank weight device" << rank_weight.device();
+    //     auto q_weight_rank = q_weight.chunk(tp_size, 0)[tp_rank];
+    //     auto k_weight_rank = k_weight.chunk(tp_size, 0)[tp_rank];
+    //     auto v_weight_rank = v_weight.chunk(tp_size, 0)[tp_rank];
+    //     auto mlp_weight_rank = mlp_weight.chunk(tp_size, 0)[tp_rank];
 
-        // Directly set the weight instead of using load_state_dict
-        LOG(INFO) << "rank_weight shape" << rank_weight.sizes();
-        /*
-        auto emb_flat = rank_weight.contiguous().flatten();
-        std::ostringstream oss;
-        oss << "First 100 values: ";
-        for (int i = 0; i < std::min(100, static_cast<int>(emb_flat.size(0)));
-        ++i) { oss << emb_flat[i].item<float>() << " ";
-        }
-        LOG(INFO) << oss.str();
-        */
-        to_qkv_mlp_->set_weight(rank_weight);
+    //     auto rank_weight = torch::cat(
+    //         {q_weight_rank, k_weight_rank, v_weight_rank, mlp_weight_rank},
+    //         0);
 
-        //       torch::Tensor save_rank_weight = rank_weight.to(torch::kCPU);
-        // torch::save(save_rank_weight,
-        // "/export/home/weinan5/wangshuibin/10_new_flux2_tp_xllm/dump_flux2_tensor/01_single_parallel_weight/rank"
-        // + std::to_string(parallel_args_.rank_) +
-        // "/01_single_parallel_qkvmlp_weight.pt");
+    //     // Directly set the weight instead of using load_state_dict
+    //     LOG(INFO) << "rank_weight shape" << rank_weight.sizes();
+    //     to_qkv_mlp_->set_weight(rank_weight);
 
-      } else {
-        // Directly set the weight instead of using load_state_dict
-        to_qkv_mlp_->set_weight(fused_weight);
-      }
-    }
+    //       torch::Tensor save_rank_weight = rank_weight.to(torch::kCPU);
+    // torch::save(save_rank_weight,
+    // "/export/home/weinan5/wangshuibin/10_new_flux2_tp_xllm/dump_flux2_tensor/01_single_parallel_weight/rank"
+    // + std::to_string(parallel_args_.rank_) +
+    // "/01_single_parallel_qkvmlp_weight.pt");
+
+    //   } else {
+    //     // Directly set the weight instead of using load_state_dict
+    //     to_qkv_mlp_->set_weight(fused_weight);
+    //   }
+    // }
     norm_q_->load_state_dict(state_dict.get_dict_with_prefix("norm_q."));
     norm_k_->load_state_dict(state_dict.get_dict_with_prefix("norm_k."));
     to_out_->as<DiTParallelLinear>()->load_state_dict(

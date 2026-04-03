@@ -87,11 +87,14 @@ std::optional<ParallelArgs> get_dp_attn_parallel_args(
 torch::Tensor gather(const torch::Tensor& input,
                      ProcessGroup* process_group,
                      int32_t dim) {
+  LOG(INFO) << "gather function";
   if (!process_group) {
+    LOG(INFO) << "!process_group is true!!!!!";
     return input;
   }
   const int32_t world_size = process_group->world_size();
   if (world_size == 1) {
+    LOG(INFO) << "world_size == 1!!!!!";
     return input;
   }
 
@@ -101,6 +104,11 @@ torch::Tensor gather(const torch::Tensor& input,
   }
   // blocking call
   process_group->allgather(input, tensors);
+  for (int64_t i = 0; i < world_size; ++i) {
+    LOG(INFO) << "gather tensor shape" << tensors[i].sizes();
+  }
+  // LOG(INFO) << "gather tensor shape" << tensors.sizes();
+
   return torch::cat(tensors, /*dim=*/dim).contiguous();
 }
 
@@ -253,8 +261,13 @@ torch::Tensor scatter(torch::Tensor input,
       << world_size;
 
   // torch::split does not create contiguous tensors by default.
+
+  LOG(INFO) << "in scatter function with dim_size" << dim_size;
+
   const auto tensor_list = input.split(dim_size / world_size, dim);
   const int32_t rank = process_group->rank();
+
+  LOG(INFO) << "after scatter the shape is " << tensor_list[rank].sizes();
   return tensor_list[rank];
 }
 

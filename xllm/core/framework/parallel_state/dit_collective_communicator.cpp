@@ -105,6 +105,9 @@ void DiTCollectiveCommunicator::create_process_groups(
                                          "tp_group",
                                          device);
     parallel_args_->dit_tp_group_ = dit_tp_group_.get();
+
+    LOG(INFO) << "the dit tp group is already init";
+
 #endif
     port += num_group;
   }

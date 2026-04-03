@@ -13,7 +13,7 @@ import PIL.ImageOps
 import torch
 import os
 # 1. 配置后端地址（根据实际部署修改IP和端口）
-api_base = "http://127.0.0.1:18002" # 后端服务基础地址
+api_base = "http://127.0.0.1:18018" # 后端服务基础地址
 api_endpoint = f"{api_base}/v1/image/generation" # 图像生成接口路径
 model_name = "flux2" # 模型名，需与后端支持的模型匹配（flux-schnell/flux-dev）
 
@@ -198,7 +198,7 @@ def test_image_generation():
                 },
                 "parameters": {
                 "size": "1024*1024",
-                "num_inference_steps": 40, # 注意：flux-schnell推荐4步，dev推荐50步，28步可能非最优
+                "num_inference_steps": 50, # 注意：flux-schnell推荐4步，dev推荐50步，28步可能非最优
                 "guidance_scale": 3.5,
                 "true_cfg_scale": 3.0,
                 "num_images_per_prompt": 1,
