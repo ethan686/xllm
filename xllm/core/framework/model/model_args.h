@@ -413,8 +413,8 @@ struct ModelArgs {
   PROPERTY(bool, cross_attn_norm) = true;
   PROPERTY(int64_t, ffn_dim) = 13824;
   PROPERTY(int64_t, time_freq_dim) = 256;
-  PROPERTY(int64_t, in_channels) = 36;
-  PROPERTY(int64_t, out_channels) = 16;
+  PROPERTY(int64_t, dit_in_channels) = 36;
+  PROPERTY(int64_t, dit_out_channels) = 16;
   PROPERTY(std::string, qk_norm) = "rms_norm_across_heads";
   PROPERTY(int64_t, rope_max_seq_len) = 1024;
   PROPERTY(int64_t, text_embed_dim) = 4096;

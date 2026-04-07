@@ -1447,10 +1447,10 @@ REGISTER_MODEL_ARGS(Wan2_2Transformer, [&] {
   LOAD_ARG_OR(eps, "eps", 1e-6);
   LOAD_ARG_OR(ffn_dim, "ffn_dim", 13824);
   LOAD_ARG_OR(time_freq_dim, "freq_dim", 256);
-  LOAD_ARG_OR(in_channels, "in_channels", 36);
+  LOAD_ARG_OR(in_channels, "dit_in_channels", 36);
   LOAD_ARG_OR(n_heads, "num_attention_heads", 40);
   LOAD_ARG_OR(num_layers, "num_layers", 40);
-  LOAD_ARG_OR(out_channels, "out_channels", 16);
+  LOAD_ARG_OR(out_channels, "dit_out_channels", 16);
   LOAD_ARG_OR(wan_patch_size, "patch_size", (std::vector<int64_t>{1, 2, 2}));
   LOAD_ARG_OR(qk_norm, "qk_norm", "rms_norm_across_heads");
   LOAD_ARG_OR(rope_max_seq_len, "rope_max_seq_len", 1024);
