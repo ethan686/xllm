@@ -33,6 +33,7 @@ limitations under the License.
 #include "core/framework/state_dict/utils.h"
 #include "core/layers/common/add_matmul.h"
 #include "core/layers/common/rms_norm.h"
+#include "dit_parallel_linear_v6.h"
 #include "framework/model_context.h"
 #include "models/model_registry.h"
 #if defined(USE_NPU)
@@ -236,10 +237,35 @@ class WanGELUImpl : public torch::nn::Module {
   WanGELUImpl(int64_t dim_in,
               int64_t dim_out,
               bool approximate = false,
-              bool with_bias = true)
-      : approximate_(approximate), options_(torch::dtype(torch::kFloat32)) {
-    proj_ = register_module(
-        "proj", layer::AddMatmul(dim_in, dim_out, with_bias, options_));
+              bool with_bias = true,
+              const ModelContext& context = ModelContext(),
+              const ParallelArgs& parallel_args = ParallelArgs())
+      : approximate_(approximate),
+        options_(context.get_tensor_options()),
+        parallel_args_(parallel_args) {
+    LinearType linear_type = LinearType::Default;
+    std::optional<TpOptions> tp_options = std::nullopt;
+
+    if (FLAGS_dit_tp_size > 1) {
+      linear_type = LinearType::TensorParallel;
+      tp_options = TpOptions(
+          /*column_parallel=*/true,
+          /*tp_rank=*/parallel_args_.rank_,
+          /*tp_size=*/FLAGS_dit_tp_size,
+          /*gather_output=*/false,
+          /*need_scatter=*/false,
+          /*is_save=*/false,
+          /*process_group=*/parallel_args_.dit_tp_group_);
+    }
+
+    auto proj = DiTParallelLinearFactory::create(dim_in,
+                                                 dim_out,
+                                                 with_bias,
+                                                 options_,
+                                                 linear_type,
+                                                 std::nullopt,
+                                                 tp_options);
+    proj_ = register_module("proj", proj);
   }
 
   torch::Tensor forward(const torch::Tensor& hidden_states) {
@@ -253,23 +279,27 @@ class WanGELUImpl : public torch::nn::Module {
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    proj_->load_state_dict(state_dict.get_dict_with_prefix("proj."));
+    proj_->as<DiTParallelLinear>()->load_state_dict(
+        state_dict.get_dict_with_prefix("proj."));
   }
 
   void verify_loaded_weights(const std::string& prefix) const {
-    proj_->verify_loaded_weights(prefix + "proj.");
+    proj_->as<DiTParallelLinear>()->verify_loaded_weights(prefix + "proj.");
   }
 
  private:
   bool approximate_;
   torch::TensorOptions options_;
-  layer::AddMatmul proj_{nullptr};
+  ParallelArgs parallel_args_;
+  DiTParallelLinear proj_{nullptr};
 };
 TORCH_MODULE(WanGELU);
 
 class WanFeedForwardImpl : public torch::nn::Module {
  public:
-  WanFeedForwardImpl(int64_t dim,
+  WanFeedForwardImpl(const ModelContext& context,
+                     const ParallelArgs& parallel_args,
+                     int64_t dim,
                      int64_t dim_out = -1,
                      int64_t mult = 4,
                      float dropout = 0.0f,
@@ -277,7 +307,7 @@ class WanFeedForwardImpl : public torch::nn::Module {
                      bool final_dropout = false,
                      int64_t inner_dim = -1,
                      bool with_bias = true)
-      : options_(torch::dtype(torch::kFloat32)) {
+      : options_(context.get_tensor_options()), parallel_args_(parallel_args) {
     int64_t actual_inner_dim =
         (inner_dim > 0) ? inner_dim : static_cast<int64_t>(dim * mult);
     int64_t actual_dim_out = (dim_out > 0) ? dim_out : dim;
@@ -295,10 +325,29 @@ class WanFeedForwardImpl : public torch::nn::Module {
 
     dropout_ = register_module("dropout", torch::nn::Dropout(dropout));
 
-    proj_out_ = register_module(
-        "proj_out",
-        layer::AddMatmul(
-            actual_inner_dim, actual_dim_out, with_bias, options_));
+    LinearType linear_out_type = LinearType::Default;
+    std::optional<TpOptions> tp_out_options = std::nullopt;
+
+    if (FLAGS_dit_tp_size > 1) {
+      linear_out_type = LinearType::TensorParallel;
+      tp_out_options = TpOptions(
+          /*column_parallel=*/false,
+          /*tp_rank=*/parallel_args_.rank_,
+          /*tp_size=*/FLAGS_dit_tp_size,
+          /*gather_output=*/true,
+          /*need_scatter=*/true,
+          /*is_save=*/false,
+          /*process_group=*/parallel_args_.dit_tp_group_);
+    }
+
+    auto proj_out = DiTParallelLinearFactory::create(actual_inner_dim,
+                                                     actual_dim_out,
+                                                     false,
+                                                     options_,
+                                                     linear_out_type,
+                                                     std::nullopt,
+                                                     tp_out_options);
+    proj_out_ = register_module("proj_out", proj_out);
 
     if (final_dropout) {
       final_dropout_ =
@@ -328,9 +377,10 @@ class WanFeedForwardImpl : public torch::nn::Module {
 
  private:
   torch::TensorOptions options_;
+  ParallelArgs parallel_args_;
   WanGELU act_fn_{nullptr};
   torch::nn::Dropout dropout_{nullptr};
-  layer::AddMatmul proj_out_{nullptr};
+  DiTParallelLinear proj_out_{nullptr};
   torch::nn::Dropout final_dropout_{nullptr};
 };
 TORCH_MODULE(WanFeedForward);
@@ -401,8 +451,9 @@ TORCH_MODULE(WanPixArtAlphaTextProjection);
 class WanAttentionImpl : public torch::nn::Module {
  public:
   explicit WanAttentionImpl(const ModelContext& context,
+                            const ParallelArgs& parallel_args,
                             int64_t cross_attention_dim_head = -1)
-      : options_(context.get_tensor_options()) {
+      : options_(context.get_tensor_options()), parallel_args_(parallel_args) {
     auto model_args = context.get_model_args();
     dim_ = model_args.head_dim() * model_args.n_heads();
     heads_ = model_args.n_heads();
@@ -421,31 +472,98 @@ class WanAttentionImpl : public torch::nn::Module {
     } else {
       kv_inner_dim_ = heads_ * dim_head_;
     }
-
-    to_q_ = register_module(
-        "to_q", layer::AddMatmul(dim_, heads_ * dim_head_, true, options_));
-    to_k_ = register_module(
-        "to_k", layer::AddMatmul(dim_, kv_inner_dim_, true, options_));
-    to_v_ = register_module(
-        "to_v", layer::AddMatmul(dim_, kv_inner_dim_, true, options_));
-
-    to_out_ = register_module(
-        "to_out", layer::AddMatmul(heads_ * dim_head_, dim_, true, options_));
-
+    LinearType linear_type = LinearType::Default;
+    std::optional<TpOptions> tp_options = std::nullopt;
+    if (FLAGS_dit_tp_size > 1) {
+      linear_type = LinearType::TensorParallel;
+      tp_options = TpOptions(
+          /*column_parallel=*/true,
+          /*tp_rank=*/parallel_args_.rank_,
+          /*tp_size=*/FLAGS_dit_tp_size,
+          /*gather_output=*/false,
+          /*need_scatter=*/false,
+          /*is_save=*/false,
+          /*process_group=*/parallel_args_.dit_tp_group_);
+    }
+    auto to_q = DiTParallelLinearFactory::create(dim_,
+                                                 heads_ * dim_head_,
+                                                 true,
+                                                 options_,
+                                                 linear_type,
+                                                 std::nullopt,
+                                                 tp_options);
+    to_q_ = register_module("to_q", to_q);
+    auto to_k = DiTParallelLinearFactory::create(dim_,
+                                                 kv_inner_dim_,
+                                                 true,
+                                                 options_,
+                                                 linear_type,
+                                                 std::nullopt,
+                                                 tp_options);
+    to_k_ = register_module("to_k", to_k);
+    auto to_v = DiTParallelLinearFactory::create(dim_,
+                                                 kv_inner_dim_,
+                                                 true,
+                                                 options_,
+                                                 linear_type,
+                                                 std::nullopt,
+                                                 tp_options);
+    to_v_ = register_module("to_v", to_v);
+    LinearType to_out_type = LinearType::Default;
+    std::optional<TpOptions> tp_out_options = std::nullopt;
+    if (FLAGS_dit_tp_size > 1) {
+      to_out_type = LinearType::TensorParallel;
+      tp_out_options = TpOptions(
+          /*column_parallel=*/false,
+          /*tp_rank=*/parallel_args_.rank_,
+          /*tp_size=*/FLAGS_dit_tp_size,
+          /*gather_output=*/false,
+          /*need_scatter=*/false,
+          /*is_save=*/false,
+          /*process_group=*/parallel_args_.dit_tp_group_);
+    }
+    auto to_out = DiTParallelLinearFactory::create(heads_ * dim_head_,
+                                                   dim_,
+                                                   true,
+                                                   options_,
+                                                   to_out_type,
+                                                   std::nullopt,
+                                                   tp_out_options);
+    to_out_ = register_module("to_out", to_out);
     norm_q_ = register_module(
         "norm_q", layer::RMSNorm(dim_head_ * heads_, eps_, options_));
     norm_k_ = register_module(
         "norm_k", layer::RMSNorm(dim_head_ * heads_, eps_, options_));
-
     if (added_kv_proj_dim_ > 0) {
-      add_k_proj_ = register_module(
-          "add_k_proj",
-          layer::AddMatmul(
-              added_kv_proj_dim_, heads_ * dim_head_, true, options_));
-      add_v_proj_ = register_module(
-          "add_v_proj",
-          layer::AddMatmul(
-              added_kv_proj_dim_, heads_ * dim_head_, true, options_));
+      LinearType add_kv_type = LinearType::Default;
+      std::optional<TpOptions> add_kv_options = std::nullopt;
+      if (FLAGS_dit_tp_size > 1) {
+        add_kv_type = LinearType::TensorParallel;
+        add_kv_options = TpOptions(
+            /*column_parallel=*/true,
+            /*tp_rank=*/parallel_args_.rank_,
+            /*tp_size=*/FLAGS_dit_tp_size,
+            /*gather_output=*/false,
+            /*need_scatter=*/false,
+            /*is_save=*/false,
+            /*process_group=*/parallel_args_.dit_tp_group_);
+      }
+      auto add_k_proj = DiTParallelLinearFactory::create(added_kv_proj_dim_,
+                                                         heads_ * dim_head_,
+                                                         true,
+                                                         options_,
+                                                         add_kv_type,
+                                                         std::nullopt,
+                                                         add_kv_options);
+      add_k_proj_ = register_module("add_k_proj", add_k_proj);
+      auto add_v_proj = DiTParallelLinearFactory::create(added_kv_proj_dim_,
+                                                         heads_ * dim_head_,
+                                                         true,
+                                                         options_,
+                                                         add_kv_type,
+                                                         std::nullopt,
+                                                         add_kv_options);
+      add_v_proj_ = register_module("add_v_proj", add_v_proj);
       norm_added_k_ = register_module(
           "norm_added_k", layer::RMSNorm(dim_head_ * heads_, eps_, options_));
     }
@@ -621,12 +739,13 @@ class WanAttentionImpl : public torch::nn::Module {
   float dropout_;
   bool is_cross_attention_;
 
-  layer::AddMatmul to_q_{nullptr};
-  layer::AddMatmul to_k_{nullptr};
-  layer::AddMatmul to_v_{nullptr};
-  layer::AddMatmul to_out_{nullptr};
-  layer::AddMatmul add_k_proj_{nullptr};
-  layer::AddMatmul add_v_proj_{nullptr};
+  DiTParallelLinear to_q_{nullptr};
+  DiTParallelLinear to_k_{nullptr};
+  DiTParallelLinear to_v_{nullptr};
+  DiTParallelLinear to_out_{nullptr};
+  DiTParallelLinear add_k_proj_{nullptr};
+  DiTParallelLinear add_v_proj_{nullptr};
+  ParallelArgs parallel_args_;
 
   layer::RMSNorm norm_q_{nullptr};
   layer::RMSNorm norm_k_{nullptr};
@@ -920,8 +1039,9 @@ TORCH_MODULE(WanRotaryPosEmbed);
 
 class WanTransformerBlockImpl : public torch::nn::Module {
  public:
-  explicit WanTransformerBlockImpl(const ModelContext& context)
-      : options_(context.get_tensor_options()) {
+  explicit WanTransformerBlockImpl(const ModelContext& context,
+                                   const ParallelArgs& parallel_args)
+      : options_(context.get_tensor_options()), parallel_args_(parallel_args) {
     auto model_args = context.get_model_args();
     dim_ = model_args.head_dim() * model_args.n_heads();
     ffn_dim_ = model_args.ffn_dim();
@@ -932,19 +1052,24 @@ class WanTransformerBlockImpl : public torch::nn::Module {
     qk_norm_ = model_args.qk_norm();
 
     norm1_ = register_module("norm1", FP32LayerNorm(dim_, eps_, false));
-    attn1_ = register_module("attn1", WanAttention(context));
-
-    attn2_ = register_module("attn2", WanAttention(context, dim_ / num_heads_));
+    attn1_ = register_module("attn1", WanAttention(context, parallel_args));
+    attn2_ = register_module(
+        "attn2", WanAttention(context, parallel_args, dim_ / num_heads_));
     if (cross_attn_norm_) {
       norm2_ = register_module("norm2", FP32LayerNorm(dim_, eps_, true));
     }
-
-    ff_ = register_module(
-        "ff",
-        WanFeedForward(
-            dim_, dim_, 1, 0.0f, "gelu-approximate", false, ffn_dim_, true));
+    ff_ = register_module("ff",
+                          WanFeedForward(context,
+                                         parallel_args,
+                                         dim_,
+                                         dim_,
+                                         1,
+                                         0.0f,
+                                         "gelu-approximate",
+                                         false,
+                                         ffn_dim_,
+                                         true));
     norm3_ = register_module("norm3", FP32LayerNorm(dim_, eps_, false));
-
     scale_shift_table_ =
         register_parameter("scale_shift_table",
                            torch::randn({1, 6, dim_}, options_) /
