@@ -405,10 +405,14 @@ struct ModelArgs {
   PROPERTY(int64_t, vae_out_channels) = -1;
   PROPERTY(int64_t, vae_base_dim) = 0;
   PROPERTY(int64_t, vae_z_dim) = 0;
+  PROPERTY(int64_t, vae_scale_factor_temporal) = 0;
+  PROPERTY(int64_t, vae_scale_factor_spatial) = 0;
   PROPERTY(std::vector<int64_t>, vae_dim_mult) = {};
   PROPERTY(int64_t, vae_num_res_blocks) = 0;
   PROPERTY(std::vector<double>, vae_attn_scales) = {};
   PROPERTY(std::vector<bool>, vae_temporal_downsample) = {};
+  PROPERTY(std::vector<double>, vae_latents_mean) = {};
+  PROPERTY(std::vector<double>, vae_latents_std) = {};
   PROPERTY(double, vae_dropout) = 0.0;
   PROPERTY(bool, vae_is_residual) = false;
 

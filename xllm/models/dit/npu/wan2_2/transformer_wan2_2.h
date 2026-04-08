@@ -26,7 +26,6 @@ limitations under the License.
 #include <string>
 #include <vector>
 
-#include "../../transformer_flux.h"
 #include "core/framework/dit_model_loader.h"
 #include "core/framework/model/model_input_params.h"
 #include "core/framework/state_dict/state_dict.h"
@@ -35,6 +34,7 @@ limitations under the License.
 #include "core/layers/common/rms_norm.h"
 #include "dit_parallel_linear_v6.h"
 #include "framework/model_context.h"
+#include "models/dit/transformer_flux.h"
 #include "models/model_registry.h"
 #if defined(USE_NPU)
 #include "torch_npu/csrc/aten/CustomFunctions.h"
@@ -45,7 +45,7 @@ namespace xllm {
 inline torch::Tensor wan_apply_rotary_emb(const torch::Tensor& hidden_states,
                                           const torch::Tensor& freqs_cos,
                                           const torch::Tensor& freqs_sin) {
-  auto x = hidden_states.unflatten(-1, -1, 2);
+  auto x = hidden_states.unflatten(-1, std::vector<int64_t>{-1, 2});
   auto x1 = x.select(-1, 0);
   auto x2 = x.select(-1, 1);
 
@@ -81,12 +81,12 @@ class FP32LayerNormImpl : public torch::nn::Module {
         weight.defined() ? weight.to(torch::kFloat32) : torch::Tensor();
     auto bias_fp32 =
         bias.defined() ? bias.to(torch::kFloat32) : torch::Tensor();
-    auto out = torch::nn::functional::layer_norm(
-        x.to(torch::kFloat32),
-        normalized_shape_,
-        weight_fp32.defined() ? weight_fp32 : torch::Tensor(),
-        bias_fp32.defined() ? bias_fp32 : torch::Tensor(),
-        eps_);
+    auto out =
+        torch::layer_norm(x.to(torch::kFloat32),
+                          std::vector<int64_t>{normalized_shape_},
+                          weight_fp32.defined() ? weight_fp32 : torch::Tensor(),
+                          bias_fp32.defined() ? bias_fp32 : torch::Tensor(),
+                          eps_);
     return out.to(origin_dtype);
   }
 
@@ -236,22 +236,22 @@ class WanGELUImpl : public torch::nn::Module {
  public:
   WanGELUImpl(int64_t dim_in,
               int64_t dim_out,
-              bool approximate = false,
-              bool with_bias = true,
-              const ModelContext& context = ModelContext(),
-              const ParallelArgs& parallel_args = ParallelArgs())
+              bool approximate,
+              bool with_bias,
+              const ModelContext& context,
+              const ParallelArgs& parallel_args)
       : approximate_(approximate),
         options_(context.get_tensor_options()),
         parallel_args_(parallel_args) {
     LinearType linear_type = LinearType::Default;
     std::optional<TpOptions> tp_options = std::nullopt;
 
-    if (FLAGS_dit_tp_size > 1) {
+    if (FLAGS_tp_size > 1) {
       linear_type = LinearType::TensorParallel;
       tp_options = TpOptions(
           /*column_parallel=*/true,
           /*tp_rank=*/parallel_args_.rank_,
-          /*tp_size=*/FLAGS_dit_tp_size,
+          /*tp_size=*/FLAGS_tp_size,
           /*gather_output=*/false,
           /*need_scatter=*/false,
           /*is_save=*/false,
@@ -268,8 +268,8 @@ class WanGELUImpl : public torch::nn::Module {
     proj_ = register_module("proj", proj);
   }
 
-  torch::Tensor forward(const torch::Tensor& hidden_states) {
-    hidden_states = proj_->forward(hidden_states);
+  torch::Tensor forward(const torch::Tensor& hidden_states_in) {
+    torch::Tensor hidden_states = proj_->forward(hidden_states_in);
     if (approximate_) {
       hidden_states = torch::gelu(hidden_states, "tanh");
     } else {
@@ -314,13 +314,19 @@ class WanFeedForwardImpl : public torch::nn::Module {
 
     if (activation_fn == "gelu") {
       act_fn_ = register_module(
-          "act_fn", WanGELU(dim, actual_inner_dim, false, with_bias));
+          "act_fn",
+          WanGELU(
+              dim, actual_inner_dim, false, with_bias, context, parallel_args));
     } else if (activation_fn == "gelu-approximate") {
       act_fn_ = register_module(
-          "act_fn", WanGELU(dim, actual_inner_dim, true, with_bias));
+          "act_fn",
+          WanGELU(
+              dim, actual_inner_dim, true, with_bias, context, parallel_args));
     } else {
       act_fn_ = register_module(
-          "act_fn", WanGELU(dim, actual_inner_dim, true, with_bias));
+          "act_fn",
+          WanGELU(
+              dim, actual_inner_dim, true, with_bias, context, parallel_args));
     }
 
     dropout_ = register_module("dropout", torch::nn::Dropout(dropout));
@@ -328,12 +334,12 @@ class WanFeedForwardImpl : public torch::nn::Module {
     LinearType linear_out_type = LinearType::Default;
     std::optional<TpOptions> tp_out_options = std::nullopt;
 
-    if (FLAGS_dit_tp_size > 1) {
+    if (FLAGS_tp_size > 1) {
       linear_out_type = LinearType::TensorParallel;
       tp_out_options = TpOptions(
           /*column_parallel=*/false,
           /*tp_rank=*/parallel_args_.rank_,
-          /*tp_size=*/FLAGS_dit_tp_size,
+          /*tp_size=*/FLAGS_tp_size,
           /*gather_output=*/true,
           /*need_scatter=*/true,
           /*is_save=*/false,
@@ -425,7 +431,7 @@ class WanPixArtAlphaTextProjectionImpl : public torch::nn::Module {
 
   torch::Tensor forward(const torch::Tensor& caption) {
     auto hidden_states = linear_1_->forward(caption);
-    hidden_states = act_1_(hidden_states);
+    hidden_states = act_1_.forward(hidden_states);
     hidden_states = linear_2_->forward(hidden_states);
     return hidden_states;
   }
@@ -464,7 +470,7 @@ class WanAttentionImpl : public torch::nn::Module {
 
     int64_t cross_dim_head = (cross_attention_dim_head > 0)
                                  ? cross_attention_dim_head
-                                 : model_args.cross_attention_dim_head();
+                                 : model_args.head_dim();
     is_cross_attention_ = cross_dim_head > 0;
 
     if (is_cross_attention_) {
@@ -474,12 +480,12 @@ class WanAttentionImpl : public torch::nn::Module {
     }
     LinearType linear_type = LinearType::Default;
     std::optional<TpOptions> tp_options = std::nullopt;
-    if (FLAGS_dit_tp_size > 1) {
+    if (FLAGS_tp_size > 1) {
       linear_type = LinearType::TensorParallel;
       tp_options = TpOptions(
           /*column_parallel=*/true,
           /*tp_rank=*/parallel_args_.rank_,
-          /*tp_size=*/FLAGS_dit_tp_size,
+          /*tp_size=*/FLAGS_tp_size,
           /*gather_output=*/false,
           /*need_scatter=*/false,
           /*is_save=*/false,
@@ -511,12 +517,12 @@ class WanAttentionImpl : public torch::nn::Module {
     to_v_ = register_module("to_v", to_v);
     LinearType to_out_type = LinearType::Default;
     std::optional<TpOptions> tp_out_options = std::nullopt;
-    if (FLAGS_dit_tp_size > 1) {
+    if (FLAGS_tp_size > 1) {
       to_out_type = LinearType::TensorParallel;
       tp_out_options = TpOptions(
           /*column_parallel=*/false,
           /*tp_rank=*/parallel_args_.rank_,
-          /*tp_size=*/FLAGS_dit_tp_size,
+          /*tp_size=*/FLAGS_tp_size,
           /*gather_output=*/false,
           /*need_scatter=*/false,
           /*is_save=*/false,
@@ -537,12 +543,12 @@ class WanAttentionImpl : public torch::nn::Module {
     if (added_kv_proj_dim_ > 0) {
       LinearType add_kv_type = LinearType::Default;
       std::optional<TpOptions> add_kv_options = std::nullopt;
-      if (FLAGS_dit_tp_size > 1) {
+      if (FLAGS_tp_size > 1) {
         add_kv_type = LinearType::TensorParallel;
         add_kv_options = TpOptions(
             /*column_parallel=*/true,
             /*tp_rank=*/parallel_args_.rank_,
-            /*tp_size=*/FLAGS_dit_tp_size,
+            /*tp_size=*/FLAGS_tp_size,
             /*gather_output=*/false,
             /*need_scatter=*/false,
             /*is_save=*/false,
@@ -570,13 +576,15 @@ class WanAttentionImpl : public torch::nn::Module {
   }
 
   torch::Tensor forward(
-      const torch::Tensor& hidden_states,
+      const torch::Tensor& hidden_states_in,
       const torch::Tensor& encoder_hidden_states = torch::Tensor(),
       std::optional<std::pair<torch::Tensor, torch::Tensor>> rotary_emb =
           std::nullopt) {
-    torch::Tensor encoder_hidden_states_img;
+    torch::Tensor hidden_states = hidden_states_in;
+    torch::Tensor enc_hidden = encoder_hidden_states;
     torch::Tensor encoder_hidden_states_text =
-        encoder_hidden_states.defined() ? encoder_hidden_states : hidden_states;
+        enc_hidden.defined() ? enc_hidden : hidden_states;
+    torch::Tensor encoder_hidden_states_img;
 
     if (add_k_proj_ && encoder_hidden_states_text.defined() &&
         encoder_hidden_states_text.size(1) > 512) {
@@ -599,9 +607,9 @@ class WanAttentionImpl : public torch::nn::Module {
     key = key.view({batch_size, -1, heads_, dim_head_});
     value = value.view({batch_size, -1, heads_, dim_head_});
 
-    if (rotary_emb.defined() && rotary_emb.size(0) >= 2) {
-      torch::Tensor freqs_cos = rotary_emb[0];
-      torch::Tensor freqs_sin = rotary_emb[1];
+    if (rotary_emb.has_value()) {
+      torch::Tensor freqs_cos = rotary_emb->first;
+      torch::Tensor freqs_sin = rotary_emb->second;
       query = wan_apply_rotary_emb(query, freqs_cos, freqs_sin);
       key = wan_apply_rotary_emb(key, freqs_cos, freqs_sin);
     }
@@ -718,15 +726,8 @@ class WanAttentionImpl : public torch::nn::Module {
     to_v_->verify_loaded_weights(prefix + "to_v.");
 
     to_out_->verify_loaded_weights(prefix + "to_out.0.");
-
-    norm_q_->verify_loaded_weights(prefix + "norm_q.");
-    norm_k_->verify_loaded_weights(prefix + "norm_k.");
-
-    if (add_k_proj_) {
-      add_k_proj_->verify_loaded_weights(prefix + "add_k_proj.");
-      add_v_proj_->verify_loaded_weights(prefix + "add_v_proj.");
-      norm_added_k_->verify_loaded_weights(prefix + "norm_added_k.");
-    }
+    // norm_q_, norm_k_, norm_added_k_ are RMSNorm which has no
+    // verify_loaded_weights
   }
 
  private:
@@ -761,15 +762,23 @@ class WanImageEmbeddingImpl : public torch::nn::Module {
   explicit WanImageEmbeddingImpl(const ModelContext& context)
       : options_(context.get_tensor_options()) {
     auto model_args = context.get_model_args();
+    auto parallel_args = context.get_parallel_args();
     in_features_ = model_args.image_embed_dim();
     out_features_ = model_args.head_dim() * model_args.n_heads();
     pos_embed_seq_len_ = model_args.pos_embed_seq_len();
 
     norm1_ = register_module("norm1", FP32LayerNorm(in_features_, 1e-6));
-    ff_ = register_module(
-        "ff",
-        WanFeedForward(
-            in_features_, out_features_, 1, 0.0f, "gelu", false, -1, true));
+    ff_ = register_module("ff",
+                          WanFeedForward(context,
+                                         parallel_args,
+                                         in_features_,
+                                         out_features_,
+                                         1,
+                                         0.0f,
+                                         "gelu",
+                                         false,
+                                         -1,
+                                         true));
     norm2_ = register_module("norm2", FP32LayerNorm(out_features_, 1e-6));
 
     if (pos_embed_seq_len_ > 0) {
@@ -929,7 +938,7 @@ class WanRotaryPosEmbedImpl : public torch::nn::Module {
       : options_(context.get_tensor_options()) {
     auto model_args = context.get_model_args();
     attention_head_dim_ = model_args.head_dim();
-    patch_size_ = model_args.patch_size();
+    patch_size_ = model_args.wan_patch_size();
     max_seq_len_ = model_args.rope_max_seq_len();
     theta_ = 10000.0f;
 
@@ -1076,16 +1085,18 @@ class WanTransformerBlockImpl : public torch::nn::Module {
                                std::sqrt(static_cast<float>(dim_)));
   }
 
-  torch::Tensor forward(const torch::Tensor& hidden_states,
+  torch::Tensor forward(const torch::Tensor& hidden_states_in,
                         const torch::Tensor& encoder_hidden_states,
                         const torch::Tensor& timestep_proj,
-                        const torch::Tensor& rotary_emb) {
+                        std::optional<std::pair<torch::Tensor, torch::Tensor>>
+                            rotary_emb = std::nullopt) {
+    torch::Tensor hidden_states = hidden_states_in;
     torch::Tensor shift_msa, scale_msa, gate_msa, c_shift_msa, c_scale_msa,
         c_gate_msa;
 
     if (timestep_proj.dim() == 4) {
       auto scale_shift =
-          scale_shift_table_.unsqueeze(0) + timestep_proj.float();
+          scale_shift_table_.unsqueeze(0) + timestep_proj.to(torch::kFloat32);
       auto splits = scale_shift.chunk(6, 2);
       shift_msa = splits[0].squeeze(2);
       scale_msa = splits[1].squeeze(2);
@@ -1094,7 +1105,7 @@ class WanTransformerBlockImpl : public torch::nn::Module {
       c_scale_msa = splits[4].squeeze(2);
       c_gate_msa = splits[5].squeeze(2);
     } else {
-      auto scale_shift = scale_shift_table_ + timestep_proj.float();
+      auto scale_shift = scale_shift_table_ + timestep_proj.to(torch::kFloat32);
       auto splits = scale_shift.chunk(6, 1);
       shift_msa = splits[0];
       scale_msa = splits[1];
@@ -1105,29 +1116,31 @@ class WanTransformerBlockImpl : public torch::nn::Module {
     }
 
     torch::Tensor norm_hidden_states =
-        (norm1_->forward(hidden_states.float()) * (1 + scale_msa) + shift_msa)
+        (norm1_->forward(hidden_states.to(torch::kFloat32)) * (1 + scale_msa) +
+         shift_msa)
             .to(hidden_states.dtype());
     torch::Tensor attn_output =
         attn1_->forward(norm_hidden_states, norm_hidden_states, rotary_emb);
-    hidden_states = (hidden_states.float() + attn_output * gate_msa)
+    hidden_states = (hidden_states.to(torch::kFloat32) + attn_output * gate_msa)
                         .to(hidden_states.dtype());
 
     if (cross_attn_norm_) {
-      norm_hidden_states =
-          norm2_->forward(hidden_states.float()).to(hidden_states.dtype());
+      norm_hidden_states = norm2_->forward(hidden_states.to(torch::kFloat32))
+                               .to(hidden_states.dtype());
     } else {
       norm_hidden_states = hidden_states;
     }
     attn_output = attn2_->forward(
-        norm_hidden_states, encoder_hidden_states, torch::Tensor());
+        norm_hidden_states, encoder_hidden_states, std::nullopt);
     hidden_states = hidden_states + attn_output;
 
-    norm_hidden_states =
-        (norm3_->forward(hidden_states.float()) * (1 + c_scale_msa) +
-         c_shift_msa)
-            .to(hidden_states.dtype());
+    norm_hidden_states = (norm3_->forward(hidden_states.to(torch::kFloat32)) *
+                              (1 + c_scale_msa) +
+                          c_shift_msa)
+                             .to(hidden_states.dtype());
     torch::Tensor ff_output = ff_->forward(norm_hidden_states);
-    hidden_states = (hidden_states.float() + ff_output.float() * c_gate_msa)
+    hidden_states = (hidden_states.to(torch::kFloat32) +
+                     ff_output.to(torch::kFloat32) * c_gate_msa)
                         .to(hidden_states.dtype());
 
     return hidden_states;
@@ -1176,6 +1189,7 @@ class WanTransformerBlockImpl : public torch::nn::Module {
   bool scale_shift_table_loaded_{false};
 
   torch::TensorOptions options_;
+  ParallelArgs parallel_args_;
 };
 TORCH_MODULE(WanTransformerBlock);
 
@@ -1184,7 +1198,8 @@ class Wan2_2TransformerImpl : public torch::nn::Module {
   explicit Wan2_2TransformerImpl(const ModelContext& context)
       : options_(context.get_tensor_options()) {
     auto model_args = context.get_model_args();
-    patch_size_ = model_args.patch_size();
+    auto parallel_args = context.get_parallel_args();
+    patch_size_ = model_args.wan_patch_size();
     num_attention_heads_ = model_args.n_heads();
     attention_head_dim_ = model_args.head_dim();
     in_channels_ = model_args.in_channels();
@@ -1222,7 +1237,7 @@ class Wan2_2TransformerImpl : public torch::nn::Module {
 
     blocks_ = register_module("blocks", torch::nn::ModuleList());
     for (int64_t i = 0; i < num_layers_; ++i) {
-      blocks_->push_back(WanTransformerBlock(context));
+      blocks_->push_back(WanTransformerBlock(context, parallel_args));
     }
 
     norm_out_ =
@@ -1239,14 +1254,14 @@ class Wan2_2TransformerImpl : public torch::nn::Module {
   }
 
   torch::Tensor forward(
-      const torch::Tensor& hidden_states,
+      const torch::Tensor& hidden_states_in,
       const torch::Tensor& timestep,
       const torch::Tensor& encoder_hidden_states,
       const torch::Tensor& encoder_hidden_states_image = torch::Tensor()) {
-    int64_t batch_size = hidden_states.size(0);
-    int64_t num_frames = hidden_states.size(2);
-    int64_t height = hidden_states.size(3);
-    int64_t width = hidden_states.size(4);
+    int64_t batch_size = hidden_states_in.size(0);
+    int64_t num_frames = hidden_states_in.size(2);
+    int64_t height = hidden_states_in.size(3);
+    int64_t width = hidden_states_in.size(4);
 
     int64_t p_t = patch_size_[0];
     int64_t p_h = patch_size_[1];
@@ -1255,8 +1270,10 @@ class Wan2_2TransformerImpl : public torch::nn::Module {
     int64_t post_patch_height = height / p_h;
     int64_t post_patch_width = width / p_w;
 
+    torch::Tensor hidden_states = hidden_states_in;
+
     auto [freqs_cos, freqs_sin] = rope_->forward(hidden_states);
-    torch::Tensor rotary_emb = torch::stack({freqs_cos, freqs_sin}, 0);
+    auto rotary_emb = std::make_pair(freqs_cos, freqs_sin);
 
     hidden_states = patch_embedding_->forward(hidden_states);
     hidden_states = hidden_states.flatten(2).transpose(1, 2);
@@ -1292,7 +1309,8 @@ class Wan2_2TransformerImpl : public torch::nn::Module {
     }
 
     for (int64_t i = 0; i < blocks_->size(); ++i) {
-      auto block = blocks_[i].as<WanTransformerBlock>();
+      auto block =
+          std::dynamic_pointer_cast<WanTransformerBlockImpl>(blocks_[i]);
       hidden_states = block->forward(hidden_states,
                                      encoder_hidden_states_embedded,
                                      timestep_proj,
@@ -1318,7 +1336,8 @@ class Wan2_2TransformerImpl : public torch::nn::Module {
     scale = scale.to(hidden_states.device());
 
     hidden_states =
-        (norm_out_->forward(hidden_states.float()) * (1 + scale) + shift)
+        (norm_out_->forward(hidden_states.to(torch::kFloat32)) * (1 + scale) +
+         shift)
             .to(hidden_states.dtype());
     hidden_states = proj_out_->forward(hidden_states);
 
@@ -1337,12 +1356,21 @@ class Wan2_2TransformerImpl : public torch::nn::Module {
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    patch_embedding_->load_state_dict(
-        state_dict.get_dict_with_prefix("patch_embedding."));
+    // Load patch_embedding (Conv3d) weights manually
+    auto pe_dict = state_dict.get_dict_with_prefix("patch_embedding.");
+    auto pe_weight = pe_dict.get_tensor("weight");
+    if (pe_weight.defined()) {
+      patch_embedding_->weight.data().copy_(pe_weight);
+    }
+    auto pe_bias = pe_dict.get_tensor("bias");
+    if (pe_bias.defined() && patch_embedding_->bias.defined()) {
+      patch_embedding_->bias.data().copy_(pe_bias);
+    }
     condition_embedder_->load_state_dict(
         state_dict.get_dict_with_prefix("condition_embedder."));
     for (int64_t i = 0; i < blocks_->size(); ++i) {
-      auto block = blocks_[i].as<WanTransformerBlock>();
+      auto block =
+          std::dynamic_pointer_cast<WanTransformerBlockImpl>(blocks_[i]);
       block->load_state_dict(
           state_dict.get_dict_with_prefix("blocks." + std::to_string(i) + "."));
     }
@@ -1354,10 +1382,11 @@ class Wan2_2TransformerImpl : public torch::nn::Module {
   }
 
   void verify_loaded_weights(const std::string& prefix) const {
-    patch_embedding_->verify_loaded_weights(prefix + "patch_embedding.");
+    // patch_embedding weights checked via scale_shift_table below
     condition_embedder_->verify_loaded_weights(prefix + "condition_embedder.");
-    for (int64_t i = 0; i < blocks_->size(); ++i) {
-      auto block = blocks_[i].as<WanTransformerBlock>();
+    for (size_t i = 0; i < blocks_->size(); ++i) {
+      auto block = std::dynamic_pointer_cast<WanTransformerBlockImpl>(
+          blocks_->operator[](i));
       block->verify_loaded_weights(prefix + "blocks." + std::to_string(i) +
                                    ".");
     }
@@ -1428,6 +1457,9 @@ class Wan2_2DiTModelImpl : public torch::nn::Module {
 
   int64_t in_channels() { return wan2_2_transformer_->in_channels(); }
   bool guidance_embeds() { return wan2_2_transformer_->guidance_embeds(); }
+  const std::vector<int64_t>& patch_size() {
+    return wan2_2_transformer_->patch_size();
+  }
 
   void load_model(std::unique_ptr<DiTFolderLoader> loader) {
     wan2_2_transformer_->load_model(std::move(loader));

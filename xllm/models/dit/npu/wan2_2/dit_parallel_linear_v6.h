@@ -122,16 +122,16 @@ class DiTParallelLinearImpl : public torch::nn::Module {
         sp_options_(sp_options),
         tp_options_(tp_options) {
     if (linear_type_ == LinearType::Default) {
-      // Use WeightTransposeAddMatmul for default case
+      // Use AddMatmulWeightTransposed for default case
       linear_ = register_module("linear",
-                                layer::WeightTransposeAddMatmul(
+                                layer::AddMatmulWeightTransposed(
                                     in_features, out_features, bias, options));
     } else if (linear_type_ == LinearType::SequenceParallel) {
       CHECK(sp_options_.has_value())
           << "SpOptions must be provided for SequenceParallel";
       sp_options_.value().validate();
       linear_ = register_module("linear",
-                                layer::WeightTransposeAddMatmul(
+                                layer::AddMatmulWeightTransposed(
                                     in_features, out_features, bias, options));
     } else if (linear_type_ == LinearType::TensorParallel) {
       CHECK(tp_options_.has_value())
@@ -185,7 +185,7 @@ class DiTParallelLinearImpl : public torch::nn::Module {
       weight_is_loaded_ = true;
     } else {
       // For default and sequence parallel, we need to set weight through
-      // linear_ This requires access to WeightTransposeAddMatmul's weight,
+      // linear_ This requires access to AddMatmulWeightTransposed's weight,
       // which is protected For now, we'll keep using load_state_dict for these
       // cases
       std::unordered_map<std::string, torch::Tensor> temp_dict;
@@ -294,7 +294,7 @@ class DiTParallelLinearImpl : public torch::nn::Module {
       LOG(INFO) << "weight is not loaded for column parallel";
     }
 
-    // Use direct matmul instead of WeightTransposeAddMatmul
+    // Use direct matmul instead of AddMatmulWeightTransposed
     auto bias = has_bias_ ? std::optional<torch::Tensor>(bias_) : std::nullopt;
     xllm::kernel::MatmulParams matmul_params;
     matmul_params.a = input;
@@ -342,7 +342,7 @@ class DiTParallelLinearImpl : public torch::nn::Module {
           parallel_state::scatter(input, options.process_group, -1);
     }
 
-    // Use direct matmul instead of WeightTransposeAddMatmul
+    // Use direct matmul instead of AddMatmulWeightTransposed
     auto bias = has_bias_ ? std::optional<torch::Tensor>(bias_) : std::nullopt;
     xllm::kernel::MatmulParams matmul_params;
     matmul_params.a = scattered_input;
@@ -420,7 +420,7 @@ class DiTParallelLinearImpl : public torch::nn::Module {
   torch::TensorOptions options_;
 
   // Module for default and sequence parallel cases
-  layer::WeightTransposeAddMatmul linear_{nullptr};
+  layer::AddMatmulWeightTransposed linear_{nullptr};
   LinearType linear_type_;
   std::optional<SpOptions> sp_options_;
   std::optional<TpOptions> tp_options_;

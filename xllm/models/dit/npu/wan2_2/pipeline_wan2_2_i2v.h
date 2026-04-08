@@ -37,19 +37,19 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
  public:
   Wan2_2I2VPipelineImpl(const DiTModelContext& context) {
     options_ = context.get_tensor_options();
-    const auto& model_args = context.get_model_args("vae");
-    zdim_ = model_args.zdim();
-    latents_mean_ = model_args.latents_mean();
-    latents_std_ = model_args.latents_std();
+    const auto& vae_args = context.get_model_args("vae");
+    zdim_ = vae_args.z_dim();
+    latents_mean_ = vae_args.latents_mean();
+    latents_std_ = vae_args.latents_std();
 
-    model_args = context.get_model_args("scheduler");
-    num_train_timesteps_ = model_args.num_train_timesteps();
+    const auto& scheduler_args = context.get_model_args("scheduler");
+    num_train_timesteps_ = scheduler_args.num_train_timesteps();
 
     LOG(INFO) << "Initializing Wan2_2I2V pipeline...";
     vae_ = WANVAE(context.get_model_context("vae"));
     transformer_ = Wan2_2DiTModel(context.get_model_context("transformer"));
     transformer_2_ = Wan2_2DiTModel(context.get_model_context("transformer_2"));
-    umt5_ = UMt5EncoderModel(context.get_model_context("text_encoder"));
+    umt5_ = UMT5EncoderModel(context.get_model_context("text_encoder"));
     scheduler_ =
         UniPCMultiStepScheduler(context.get_model_context("scheduler"));
     video_processor_ = VideoProcessor(context.get_model_context("vae"),
@@ -74,8 +74,8 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
     auto seed = generation_params.seed > 0 ? generation_params.seed : 42;
     auto images = input.images.defined() ? std::make_optional(input.images)
                                          : std::nullopt;
-    auto last_images = input.last_images.defined()
-                           ? std::make_optional(input.last_images)
+    auto last_images = input.mask_images.defined()
+                           ? std::make_optional(input.mask_images)
                            : std::nullopt;
     auto prompts = std::make_optional(input.prompts);
     auto negative_prompts = input.negative_prompts.empty()
@@ -91,9 +91,6 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
         input.negative_prompt_embeds.defined()
             ? std::make_optional(input.negative_prompt_embeds)
             : std::nullopt;
-    auto image_embeds = input.image_embeds.defined()
-                            ? std::make_optional(input.image_embeds)
-                            : std::nullopt;
 
     auto output = forward_impl(images,
                                last_images,
@@ -101,14 +98,14 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
                                negative_prompts,
                                generation_params.height,
                                generation_params.width,
-                               generation_params.num_frames,
+                               /*num_frames=*/16,
                                generation_params.num_inference_steps,
                                generation_params.guidance_scale,
-                               generation_params.guidance_scale_2,
-                               generation_params.num_videos_per_prompt,
+                               /*guidance_scale_2=*/-1.0f,
+                               (int64_t)generation_params.num_images_per_prompt,
                                seed,
                                latents,
-                               image_embeds,
+                               /*image_embeds=*/std::nullopt,
                                prompt_embeds,
                                negative_prompt_embeds,
                                generation_params.max_sequence_length);
@@ -186,7 +183,7 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
           image.options());
       video_condition = torch::cat({image, zeros, last_img}, 2);
     }
-    video_condition = video_condition.to(options_.device(), vae_->dtype());
+    video_condition = video_condition.to(options_.device(), options_.dtype());
 
     torch::Tensor latents_mean =
         torch::tensor(latents_mean_, torch::dtype(torch::kFloat32))
@@ -197,7 +194,8 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
                   .view({1, num_channels_latents, 1, 1, 1})
                   .to(latents_tensor.device(), latents_tensor.dtype());
 
-    torch::Tensor latent_condition = vae_->encode(video_condition);
+    torch::Tensor latent_condition =
+        vae_->encode(video_condition).latent_dist.mode();
     latent_condition = (latent_condition - latents_mean) * latents_std;
 
     if (latent_condition.size(0) == 1 && batch_size > 1) {
@@ -319,7 +317,7 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
     if (prompt_embeds.has_value()) {
       batch_size = prompt_embeds_tensor.size(0);
     } else if (prompt.has_value()) {
-      batch_size = prompt.value().length();
+      batch_size = prompt.value().size();
     }
 
     if (do_classifier_free_guidance) {
@@ -446,7 +444,7 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
     for (int64_t i = 0; i < timesteps.numel(); ++i) {
       torch::Tensor t = timesteps[i];
 
-      Wan2_2DiTModel current_model;
+      Wan2_2DiTModel current_model = nullptr;
       float current_guidance;
 
       if (boundary_timestep < 0 || t.item<float>() >= boundary_timestep) {
@@ -512,7 +510,7 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
     }
 
     torch::Tensor video;
-    prepared_latents = prepared_latents.to(vae_->dtype());
+    prepared_latents = prepared_latents.to(options_.dtype());
 
     torch::Tensor latents_mean =
         torch::tensor(latents_mean_, torch::dtype(torch::kFloat32))
@@ -524,7 +522,7 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
                   .to(prepared_latents.device(), prepared_latents.dtype());
 
     prepared_latents = prepared_latents / latents_std + latents_mean;
-    video = vae_->decode(prepared_latents);
+    video = vae_->decode(prepared_latents).sample;
     video = video_processor_->postprocess_video(video);
 
     return video;
@@ -535,7 +533,7 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
   WANVAE vae_{nullptr};
   Wan2_2DiTModel transformer_{nullptr};
   Wan2_2DiTModel transformer_2_{nullptr};
-  UMt5EncoderModel umt5_{nullptr};
+  UMT5EncoderModel umt5_{nullptr};
   std::unique_ptr<Tokenizer> tokenizer_{nullptr};
   VideoProcessor video_processor_{nullptr};
 
@@ -547,8 +545,8 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
   bool expand_timesteps_ = false;
   int64_t zdim_ = 16;
   float num_train_timesteps_ = 1000.0f;
-  std::vector<int> latents_mean_;
-  std::vector<int> latents_std_;
+  std::vector<double> latents_mean_;
+  std::vector<double> latents_std_;
   torch::TensorOptions options_;
 };
 TORCH_MODULE(Wan2_2I2VPipeline);

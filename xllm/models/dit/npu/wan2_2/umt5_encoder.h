@@ -14,12 +14,12 @@
 #include "core/framework/dit_model_loader.h"
 #include "core/framework/model/model_input_params.h"
 #include "core/framework/state_dict/state_dict.h"
-// #include "dit_linear.h"
-#include "../../t5_encoder.h"
 #include "framework/model_context.h"
+#include "models/dit/t5_encoder.h"
 #include "models/model_registry.h"
 #include "processors/input_processor.h"
 #include "processors/pywarpper_image_processor.h"
+#include "xllm/core/layers/common/add_matmul.h"
 
 namespace xllm {
 // UMT5 model compatible with huggingface weights
@@ -63,13 +63,15 @@ class UMT5LayerNormImpl : public torch::nn::Module {
 };
 TORCH_MODULE(UMT5LayerNorm);
 
-torch::Tensor gelu_new(const torch::Tensor& x) {
-  // 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x³)))
+#ifndef GELU_NEW_DEFINED
+#define GELU_NEW_DEFINED
+torch::Tensor umt5_gelu_new(const torch::Tensor& x) {
   const double sqrt_2_over_pi = std::sqrt(2.0 / M_PI);
   return 0.5 * x *
          (1.0 +
           torch::tanh(sqrt_2_over_pi * (x + 0.044715 * torch::pow(x, 3))));
 }
+#endif
 
 class UMT5DenseInterface : public torch::nn::Module {
  public:
@@ -84,16 +86,18 @@ class UMT5DenseActDenseImpl : public UMT5DenseInterface {
     auto model_args = context.get_model_args();
     auto options = context.get_tensor_options();
     wi_ = register_module(
-        "wi", DiTLinear(model_args.d_model(), model_args.d_ff(), false));
+        "wi",
+        layer::AddMatmul(
+            model_args.d_model(), model_args.d_ff(), false, options));
     wo_ = register_module(
-        "wo", DiTLinear(model_args.d_ff(), model_args.d_model(), false));
+        "wo",
+        layer::AddMatmul(
+            model_args.d_ff(), model_args.d_model(), false, options));
 
-    wi_->to(options);
-    wo_->to(options);
     if (model_args.act_fn() == "relu") {
       act_ = register_module("act", torch::nn::Functional(torch::relu));
     } else if (model_args.act_fn() == "gelu_new") {
-      act_ = register_module("act", torch::nn::Functional(gelu_new));
+      act_ = register_module("act", torch::nn::Functional(umt5_gelu_new));
     } else {
       LOG(FATAL) << "Unsupported activation function: " << model_args.act_fn();
     }
@@ -102,10 +106,6 @@ class UMT5DenseActDenseImpl : public UMT5DenseInterface {
   torch::Tensor forward(const torch::Tensor& hidden_states) {
     torch::Tensor hidden = wi_->forward(hidden_states);
     hidden = act_(hidden);
-    if (wo_->weight.dtype() != torch::kInt8 &&
-        hidden.dtype() != wo_->weight.dtype()) {
-      hidden = hidden.to(wo_->weight.dtype());
-    }
     hidden = wo_->forward(hidden);
     return hidden;
   }
@@ -123,8 +123,8 @@ class UMT5DenseActDenseImpl : public UMT5DenseInterface {
   }
 
  private:
-  DiTLinear wi_ = nullptr;
-  DiTLinear wo_ = nullptr;
+  layer::AddMatmul wi_ = nullptr;
+  layer::AddMatmul wo_ = nullptr;
   torch::nn::Functional act_ = nullptr;
 };
 
@@ -134,19 +134,22 @@ class UMT5DenseGatedActDenseImpl : public UMT5DenseInterface {
     auto model_args = context.get_model_args();
     auto options = context.get_tensor_options();
     wi_0_ = register_module(
-        "wi_0", DiTLinear(model_args.d_model(), model_args.d_ff(), false));
+        "wi_0",
+        layer::AddMatmul(
+            model_args.d_model(), model_args.d_ff(), false, options));
     wi_1_ = register_module(
-        "wi_1", DiTLinear(model_args.d_model(), model_args.d_ff(), false));
+        "wi_1",
+        layer::AddMatmul(
+            model_args.d_model(), model_args.d_ff(), false, options));
     wo_ = register_module(
-        "wo", DiTLinear(model_args.d_ff(), model_args.d_model(), false));
+        "wo",
+        layer::AddMatmul(
+            model_args.d_ff(), model_args.d_model(), false, options));
 
-    wi_0_->to(options);
-    wi_1_->to(options);
-    wo_->to(options);
     if (model_args.act_fn() == "relu") {
       act_ = register_module("act", torch::nn::Functional(torch::relu));
     } else if (model_args.act_fn() == "gelu_new") {
-      act_ = register_module("act", torch::nn::Functional(gelu_new));
+      act_ = register_module("act", torch::nn::Functional(umt5_gelu_new));
     } else {
       LOG(FATAL) << "Unsupported activation function: " << model_args.act_fn();
     }
@@ -156,10 +159,6 @@ class UMT5DenseGatedActDenseImpl : public UMT5DenseInterface {
     torch::Tensor hidden_gelu = act_(wi_0_->forward(hidden_states));
     torch::Tensor hidden_linear = wi_1_->forward(hidden_states);
     torch::Tensor new_hidden_states = hidden_gelu * hidden_linear;
-    if (wo_->weight.dtype() != torch::kInt8 &&
-        new_hidden_states.dtype() != wo_->weight.dtype()) {
-      new_hidden_states = new_hidden_states.to(wo_->weight.dtype());
-    }
     new_hidden_states = wo_->forward(new_hidden_states);
     return new_hidden_states;
   }
@@ -180,9 +179,9 @@ class UMT5DenseGatedActDenseImpl : public UMT5DenseInterface {
   }
 
  private:
-  DiTLinear wi_0_ = nullptr;
-  DiTLinear wi_1_ = nullptr;
-  DiTLinear wo_ = nullptr;
+  layer::AddMatmul wi_0_ = nullptr;
+  layer::AddMatmul wi_1_ = nullptr;
+  layer::AddMatmul wo_ = nullptr;
   torch::nn::Functional act_ = nullptr;
 };
 
@@ -244,15 +243,14 @@ class UMT5AttentionImpl : public torch::nn::Module {
     relative_attention_max_distance_ =
         model_args.relative_attention_max_distance();
 
-    q_ = register_module("q", DiTLinear(d_model_, inner_dim_, false));
-    k_ = register_module("k", DiTLinear(d_model_, inner_dim_, false));
-    v_ = register_module("v", DiTLinear(d_model_, inner_dim_, false));
-    o_ = register_module("o", DiTLinear(inner_dim_, d_model_, false));
-
-    q_->to(options);
-    k_->to(options);
-    v_->to(options);
-    o_->to(options);
+    q_ = register_module(
+        "q", layer::AddMatmul(d_model_, inner_dim_, false, options));
+    k_ = register_module(
+        "k", layer::AddMatmul(d_model_, inner_dim_, false, options));
+    v_ = register_module(
+        "v", layer::AddMatmul(d_model_, inner_dim_, false, options));
+    o_ = register_module(
+        "o", layer::AddMatmul(inner_dim_, d_model_, false, options));
 
     if (has_relative_attention_bias_) {
       relative_attention_bias_ = register_module(
@@ -448,10 +446,10 @@ class UMT5AttentionImpl : public torch::nn::Module {
   int64_t n_heads_;
   int64_t inner_dim_;
   std::optional<int64_t> layer_idx_;
-  DiTLinear q_ = nullptr;
-  DiTLinear k_ = nullptr;
-  DiTLinear v_ = nullptr;
-  DiTLinear o_ = nullptr;
+  layer::AddMatmul q_ = nullptr;
+  layer::AddMatmul k_ = nullptr;
+  layer::AddMatmul v_ = nullptr;
+  layer::AddMatmul o_ = nullptr;
   torch::nn::Embedding relative_attention_bias_ = nullptr;
   bool is_relative_attention_bias_loaded_ = false;
   std::unordered_set<int64_t> pruned_heads_;

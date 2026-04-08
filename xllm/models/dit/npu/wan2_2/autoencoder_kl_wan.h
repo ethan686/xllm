@@ -836,7 +836,7 @@ class WanVAEEncoder3DImpl : public torch::nn::Module {
                       int64_t z_dim = 4,
                       std::vector<int64_t> dim_mult = {1, 2, 4, 4},
                       int num_res_blocks = 2,
-                      std::vector<float> attn_scales = {},
+                      std::vector<double> attn_scales = {},
                       std::vector<bool> temperal_downsample = {true,
                                                                true,
                                                                false},
@@ -1201,520 +1201,513 @@ class WanUpBlockImpl : public torch::nn::Module {
         upsamplers_[i]->as<WanResample>()->verify_loaded_weights(prefix);
       }
     }
+  }
 
-   private:
-    int64_t in_dim_;
-    int64_t out_dim_;
-    int num_res_blocks_;
-    torch::nn::ModuleList resnets_{nullptr};
-    torch::nn::ModuleList upsamplers_{nullptr};
-  };
-  TORCH_MODULE(WanUpBlock);
+ private:
+  int64_t in_dim_;
+  int64_t out_dim_;
+  int num_res_blocks_;
+  torch::nn::ModuleList resnets_{nullptr};
+  torch::nn::ModuleList upsamplers_{nullptr};
+};
+TORCH_MODULE(WanUpBlock);
 
-  class WanVAEDecoder3DImpl : public torch::nn::Module {
-   public:
-    WanVAEDecoder3DImpl(int64_t dim = 128,
-                        int64_t z_dim = 4,
-                        const std::vector<int64_t>& dim_mult = {1, 2, 4, 4},
-                        int num_res_blocks = 2,
-                        const std::vector<float>& attn_scales = {},
-                        const std::vector<bool>& temperal_upsample = {false,
-                                                                      true,
-                                                                      true},
-                        float dropout = 0.0f,
-                        int64_t out_channels = 3,
-                        bool is_residual = false) {
-      std::vector<int64_t> dims;
-      dims.push_back(dim * dim_mult.back());
-      for (auto it = dim_mult.rbegin(); it != dim_mult.rend(); ++it) {
-        dims.push_back(dim * (*it));
-      }
-      dims.erase(dims.begin());
-      conv_in_ =
-          register_module("conv_in",
-                          WanCausalConv3D(z_dim,
-                                          dims[0],
-                                          std::vector<int64_t>{3, 3, 3},
-                                          std::vector<int64_t>{1, 1, 1},
-                                          std::vector<int64_t>{1, 1, 1}));
-      mid_block_ =
-          register_module("mid_block", WanMidBlock(dims[0], dropout, 1));
-      up_blocks_ = register_module("up_blocks", torch::nn::ModuleList());
-      for (size_t i = 0; i < dims.size() - 1; ++i) {
-        int64_t in_dim = dims[i];
-        int64_t out_dim = dims[i + 1];
-        if (i > 0 && !is_residual) {
-          in_dim = in_dim / 2;
-        }
-        bool up_flag = (i != dim_mult.size() - 1);
-        std::string upsample_mode;
-        if (up_flag && temperal_upsample[i]) {
-          upsample_mode = "upsample3d";
-        } else if (up_flag) {
-          upsample_mode = "upsample2d";
-        }
-        if (is_residual) {
-          up_blocks_->push_back(
-              WanResidualUpBlock(in_dim,
-                                 out_dim,
-                                 num_res_blocks,
-                                 dropout,
-                                 (up_flag ? temperal_upsample[i] : false),
-                                 up_flag));
-        } else {
-          up_blocks_->push_back(
-              WanUpBlock(in_dim,
-                         out_dim,
-                         num_res_blocks,
-                         dropout,
-                         up_flag ? std::optional<std::string>(upsample_mode)
-                                 : std::nullopt));
-        }
-      }
-      nonlinearity_ = torch::nn::Functional(torch::silu);
-      norm_out_ = register_module("norm_out",
-                                  WanRMSNorm(dims.back(), true, false, false));
-      conv_out_ =
-          register_module("conv_out",
-                          WanCausalConv3D(dims.back(),
-                                          out_channels,
-                                          std::vector<int64_t>{3, 3, 3},
-                                          std::vector<int64_t>{1, 1, 1},
-                                          std::vector<int64_t>{1, 1, 1}));
+class WanVAEDecoder3DImpl : public torch::nn::Module {
+ public:
+  WanVAEDecoder3DImpl(int64_t dim = 128,
+                      int64_t z_dim = 4,
+                      const std::vector<int64_t>& dim_mult = {1, 2, 4, 4},
+                      int num_res_blocks = 2,
+                      const std::vector<double>& attn_scales = {},
+                      const std::vector<bool>& temperal_upsample = {false,
+                                                                    true,
+                                                                    true},
+                      float dropout = 0.0f,
+                      int64_t out_channels = 3,
+                      bool is_residual = false) {
+    std::vector<int64_t> dims;
+    dims.push_back(dim * dim_mult.back());
+    for (auto it = dim_mult.rbegin(); it != dim_mult.rend(); ++it) {
+      dims.push_back(dim * (*it));
     }
-
-    torch::Tensor forward(
-        torch::Tensor x,
-        std::shared_ptr<std::vector<torch::Tensor>> feat_cache = nullptr,
-        std::shared_ptr<std::vector<int64_t>> feat_idx = nullptr,
-        bool first_chunk = false) {
-      if (!feat_idx) feat_idx = std::make_shared<std::vector<int64_t>>(1, 0);
-
-      // conv_in
-      if (feat_cache) {
-        int64_t idx = (*feat_idx)[0];
-        torch::Tensor cache_x =
-            x.index({torch::indexing::Slice(),
-                     torch::indexing::Slice(),
-                     torch::indexing::Slice(-CACHE_T, torch::indexing::None),
-                     torch::indexing::Slice(),
-                     torch::indexing::Slice()})
-                .clone();
-        if (cache_x.size(2) < 2 && (*feat_cache)[idx].defined()) {
-          cache_x = torch::cat(
-              {(*feat_cache)[idx]
-                   .index({torch::indexing::Slice(),
-                           torch::indexing::Slice(),
-                           torch::indexing::Slice(-1, torch::indexing::None),
-                           torch::indexing::Slice(),
-                           torch::indexing::Slice()})
-                   .unsqueeze(2)
-                   .to(cache_x.device()),
-               cache_x},
-              2);
-        }
-        x = conv_in_->forward(x, (*feat_cache)[idx]);
-        (*feat_cache)[idx] = cache_x;
-        (*feat_idx)[0] += 1;
+    dims.erase(dims.begin());
+    conv_in_ = register_module("conv_in",
+                               WanCausalConv3D(z_dim,
+                                               dims[0],
+                                               std::vector<int64_t>{3, 3, 3},
+                                               std::vector<int64_t>{1, 1, 1},
+                                               std::vector<int64_t>{1, 1, 1}));
+    mid_block_ = register_module("mid_block", WanMidBlock(dims[0], dropout, 1));
+    up_blocks_ = register_module("up_blocks", torch::nn::ModuleList());
+    for (size_t i = 0; i < dims.size() - 1; ++i) {
+      int64_t in_dim = dims[i];
+      int64_t out_dim = dims[i + 1];
+      if (i > 0 && !is_residual) {
+        in_dim = in_dim / 2;
+      }
+      bool up_flag = (i != dim_mult.size() - 1);
+      std::string upsample_mode;
+      if (up_flag && temperal_upsample[i]) {
+        upsample_mode = "upsample3d";
+      } else if (up_flag) {
+        upsample_mode = "upsample2d";
+      }
+      if (is_residual) {
+        up_blocks_->push_back(
+            WanResidualUpBlock(in_dim,
+                               out_dim,
+                               num_res_blocks,
+                               dropout,
+                               (up_flag ? temperal_upsample[i] : false),
+                               up_flag));
       } else {
-        x = conv_in_->forward(x);
+        up_blocks_->push_back(
+            WanUpBlock(in_dim,
+                       out_dim,
+                       num_res_blocks,
+                       dropout,
+                       up_flag ? std::optional<std::string>(upsample_mode)
+                               : std::nullopt));
       }
+    }
+    nonlinearity_ = torch::nn::Functional(torch::silu);
+    norm_out_ = register_module("norm_out",
+                                WanRMSNorm(dims.back(), true, false, false));
+    conv_out_ = register_module("conv_out",
+                                WanCausalConv3D(dims.back(),
+                                                out_channels,
+                                                std::vector<int64_t>{3, 3, 3},
+                                                std::vector<int64_t>{1, 1, 1},
+                                                std::vector<int64_t>{1, 1, 1}));
+  }
 
-      // mid_block
-      x = mid_block_->forward(x, feat_cache, feat_idx);
+  torch::Tensor forward(
+      torch::Tensor x,
+      std::shared_ptr<std::vector<torch::Tensor>> feat_cache = nullptr,
+      std::shared_ptr<std::vector<int64_t>> feat_idx = nullptr,
+      bool first_chunk = false) {
+    if (!feat_idx) feat_idx = std::make_shared<std::vector<int64_t>>(1, 0);
 
-      // up_blocks : pass 'first_chunk'  to WanResidualUpBlock
-      for (size_t i = 0; i < up_blocks_->size(); ++i) {
-        if (auto res_up = up_blocks_[i]->as<WanResidualUpBlock>()) {
-          x = res_up->forward(x, feat_cache, feat_idx, first_chunk);
-        } else if (auto up = up_blocks_[i]->as<WanUpBlock>()) {
-          x = up->forward(x, feat_cache, feat_idx);
-        }
+    // conv_in
+    if (feat_cache) {
+      int64_t idx = (*feat_idx)[0];
+      torch::Tensor cache_x =
+          x.index({torch::indexing::Slice(),
+                   torch::indexing::Slice(),
+                   torch::indexing::Slice(-CACHE_T, torch::indexing::None),
+                   torch::indexing::Slice(),
+                   torch::indexing::Slice()})
+              .clone();
+      if (cache_x.size(2) < 2 && (*feat_cache)[idx].defined()) {
+        cache_x = torch::cat(
+            {(*feat_cache)[idx]
+                 .index({torch::indexing::Slice(),
+                         torch::indexing::Slice(),
+                         torch::indexing::Slice(-1, torch::indexing::None),
+                         torch::indexing::Slice(),
+                         torch::indexing::Slice()})
+                 .unsqueeze(2)
+                 .to(cache_x.device()),
+             cache_x},
+            2);
       }
+      x = conv_in_->forward(x, (*feat_cache)[idx]);
+      (*feat_cache)[idx] = cache_x;
+      (*feat_idx)[0] += 1;
+    } else {
+      x = conv_in_->forward(x);
+    }
 
-      x = norm_out_->forward(x);
-      x = nonlinearity_(x);
+    // mid_block
+    x = mid_block_->forward(x, feat_cache, feat_idx);
 
-      // conv_out
-      if (feat_cache) {
-        int idx = (*feat_idx)[0];
-        torch::Tensor cache_x =
-            x.index({torch::indexing::Slice(),
-                     torch::indexing::Slice(),
-                     torch::indexing::Slice(-CACHE_T, torch::indexing::None),
-                     torch::indexing::Slice(),
-                     torch::indexing::Slice()})
-                .clone();
-        if (cache_x.size(2) < 2 && (*feat_cache)[idx].defined()) {
-          cache_x = torch::cat(
-              {(*feat_cache)[idx]
-                   .index({torch::indexing::Slice(),
-                           torch::indexing::Slice(),
-                           torch::indexing::Slice(-1, torch::indexing::None),
-                           torch::indexing::Slice(),
-                           torch::indexing::Slice()})
-                   .unsqueeze(2)
-                   .to(cache_x.device()),
-               cache_x},
-              2);
-        }
-        x = conv_out_->forward(x, (*feat_cache)[idx]);
-        (*feat_cache)[idx] = cache_x;
-        (*feat_idx)[0] += 1;
+    // up_blocks : pass 'first_chunk'  to WanResidualUpBlock
+    for (size_t i = 0; i < up_blocks_->size(); ++i) {
+      if (auto res_up = up_blocks_[i]->as<WanResidualUpBlock>()) {
+        x = res_up->forward(x, feat_cache, feat_idx, first_chunk);
+      } else if (auto up = up_blocks_[i]->as<WanUpBlock>()) {
+        x = up->forward(x, feat_cache, feat_idx);
+      }
+    }
+
+    x = norm_out_->forward(x);
+    x = nonlinearity_(x);
+
+    // conv_out
+    if (feat_cache) {
+      int idx = (*feat_idx)[0];
+      torch::Tensor cache_x =
+          x.index({torch::indexing::Slice(),
+                   torch::indexing::Slice(),
+                   torch::indexing::Slice(-CACHE_T, torch::indexing::None),
+                   torch::indexing::Slice(),
+                   torch::indexing::Slice()})
+              .clone();
+      if (cache_x.size(2) < 2 && (*feat_cache)[idx].defined()) {
+        cache_x = torch::cat(
+            {(*feat_cache)[idx]
+                 .index({torch::indexing::Slice(),
+                         torch::indexing::Slice(),
+                         torch::indexing::Slice(-1, torch::indexing::None),
+                         torch::indexing::Slice(),
+                         torch::indexing::Slice()})
+                 .unsqueeze(2)
+                 .to(cache_x.device()),
+             cache_x},
+            2);
+      }
+      x = conv_out_->forward(x, (*feat_cache)[idx]);
+      (*feat_cache)[idx] = cache_x;
+      (*feat_idx)[0] += 1;
+    } else {
+      x = conv_out_->forward(x);
+    }
+    return x;
+  }
+
+  void load_state_dict(const StateDict& state_dict) {
+    conv_in_->load_state_dict(state_dict.get_dict_with_prefix("conv_in."));
+    mid_block_->load_state_dict(state_dict.get_dict_with_prefix("mid_block."));
+
+    // Safely load weights of up_blocks :
+    for (size_t i = 0; i < up_blocks_->size(); ++i) {
+      std::string prefix = "up_blocks." + std::to_string(i) + ".";
+
+      if (up_blocks_[i]->as<WanResidualUpBlock>()) {
+        up_blocks_[i]->as<WanResidualUpBlock>()->load_state_dict(
+            state_dict.get_dict_with_prefix(prefix));
+      } else if (up_blocks_[i]->as<WanUpBlock>()) {
+        up_blocks_[i]->as<WanUpBlock>()->load_state_dict(
+            state_dict.get_dict_with_prefix(prefix));
+      }
+    }
+
+    norm_out_->load_state_dict(state_dict.get_dict_with_prefix("norm_out."));
+    conv_out_->load_state_dict(state_dict.get_dict_with_prefix("conv_out."));
+  }
+
+  void verify_loaded_weights(const std::string& prefix) {
+    conv_in_->verify_loaded_weights("conv_in.");
+    mid_block_->verify_loaded_weights("mid_block.");
+
+    for (size_t i = 0; i < up_blocks_->size(); ++i) {
+      std::string p = "up_blocks." + std::to_string(i) + ".";
+      if (up_blocks_[i]->as<WanResidualUpBlock>())
+        up_blocks_[i]->as<WanResidualUpBlock>()->verify_loaded_weights(p);
+      else if (up_blocks_[i]->as<WanUpBlock>())
+        up_blocks_[i]->as<WanUpBlock>()->verify_loaded_weights(p);
+    }
+
+    norm_out_->verify_loaded_weights("norm_out.");
+    conv_out_->verify_loaded_weights("conv_out.");
+  }
+
+ private:
+  WanCausalConv3D conv_in_{nullptr};
+  WanMidBlock mid_block_{nullptr};
+  torch::nn::ModuleList up_blocks_{nullptr};
+  WanRMSNorm norm_out_{nullptr};
+  WanCausalConv3D conv_out_{nullptr};
+  torch::nn::Functional nonlinearity_{nullptr};
+  const int CACHE_T = 2;
+};
+TORCH_MODULE(WanVAEDecoder3D);
+
+class WANVAEImpl : public torch::nn::Module {
+ public:
+  WANVAEImpl(const ModelContext& context)
+      : args_(context.get_model_args()),
+        device_(context.get_tensor_options().device()),
+        dtype_(context.get_tensor_options().dtype().toScalarType()) {
+    encoder_ = register_module("encoder",
+                               WanVAEEncoder3D(args_.vae_in_channels(),
+                                               args_.vae_base_dim(),
+                                               args_.vae_z_dim() * 2,
+                                               args_.vae_dim_mult(),
+                                               args_.vae_num_res_blocks(),
+                                               args_.vae_attn_scales(),
+                                               args_.vae_temporal_downsample(),
+                                               args_.vae_dropout(),
+                                               args_.vae_is_residual()));
+
+    decoder_ = register_module("decoder",
+                               WanVAEDecoder3D(args_.vae_base_dim(),
+                                               args_.vae_z_dim(),
+                                               args_.vae_dim_mult(),
+                                               args_.vae_num_res_blocks(),
+                                               args_.vae_attn_scales(),
+                                               args_.vae_temporal_downsample(),
+                                               args_.vae_dropout(),
+                                               args_.vae_out_channels(),
+                                               args_.vae_is_residual()));
+
+    quant_conv_ =
+        register_module("quant_conv",
+                        WanCausalConv3D(2 * args_.z_dim(),
+                                        2 * args_.z_dim(),
+                                        std::vector<int64_t>{1, 1, 1}));
+
+    post_quant_conv_ = register_module(
+        "post_quant_conv",
+        WanCausalConv3D(
+            args_.z_dim(), args_.z_dim(), std::vector<int64_t>{1, 1, 1}));
+    init_cached_conv_count();
+
+    encoder_->to(dtype_);
+    decoder_->to(dtype_);
+    quant_conv_->to(dtype_);
+    post_quant_conv_->to(dtype_);
+  }
+
+  void enable_slicing(bool enable) { use_slicing_ = enable; }
+  void disable_slicing() { use_slicing_ = false; }
+
+  void clear_cache() {
+    conv_num_ = cached_conv_count_["decoder"];
+    conv_idx_ = std::make_shared<std::vector<int64_t>>(std::vector<int64_t>{0});
+    feat_map_ = std::make_shared<std::vector<torch::Tensor>>(
+        std::vector<torch::Tensor>(enc_conv_num_));
+
+    enc_conv_num_ = cached_conv_count_["encoder"];
+    enc_conv_idx_ =
+        std::make_shared<std::vector<int64_t>>(std::vector<int64_t>{0});
+    enc_feat_map_ = std::make_shared<std::vector<torch::Tensor>>(
+        std::vector<torch::Tensor>(conv_num_));
+  }
+
+  // Encode video into latent representations
+  torch::Tensor encode_(const torch::Tensor& videos) {
+    int64_t num_frame = videos.size(2);
+    int64_t height = videos.size(3);
+    int64_t width = videos.size(4);
+    int64_t iter_ = 1 + (num_frame - 1) / 4;
+    clear_cache();
+    torch::Tensor out;
+
+    feat_map_ = std::make_shared<std::vector<torch::Tensor>>(
+        std::vector<torch::Tensor>(conv_num_));
+
+    for (int64_t i = 0; i < iter_; ++i) {
+      enc_conv_idx_ = {0};
+      if (i == 0) {
+        auto x_slice = videos.index({torch::indexing::Slice(),
+                                     torch::indexing::Slice(),
+                                     torch::indexing::Slice(0, 1),
+                                     torch::indexing::Slice(),
+                                     torch::indexing::Slice()});
+        out = encoder_(x_slice, enc_feat_map_, enc_conv_idx_);
       } else {
-        x = conv_out_->forward(x);
+        int64_t start = 1 + 4 * (i - 1);
+        int64_t end = std::min(1 + 4 * i, num_frame);
+        auto x_slice = videos.index({torch::indexing::Slice(),
+                                     torch::indexing::Slice(),
+                                     torch::indexing::Slice(start, end),
+                                     torch::indexing::Slice(),
+                                     torch::indexing::Slice()});
+        auto out_ = encoder_(x_slice, enc_feat_map_, enc_conv_idx_);
+        out = torch::cat({out, out_}, 2);
       }
-      return x;
     }
+    out = quant_conv_(out);
+    clear_cache();
+    return out;
+  }
 
-    void load_state_dict(const StateDict& state_dict) {
-      conv_in_->load_state_dict(state_dict.get_dict_with_prefix("conv_in."));
-      mid_block_->load_state_dict(
-          state_dict.get_dict_with_prefix("mid_block."));
-
-      // Safely load weights of up_blocks :
-      for (size_t i = 0; i < up_blocks_->size(); ++i) {
-        std::string prefix = "up_blocks." + std::to_string(i) + ".";
-
-        if (up_blocks_[i]->as<WanResidualUpBlock>()) {
-          up_blocks_[i]->as<WanResidualUpBlock>()->load_state_dict(
-              state_dict.get_dict_with_prefix(prefix));
-        } else if (up_blocks_[i]->as<WanUpBlock>()) {
-          up_blocks_[i]->as<WanUpBlock>()->load_state_dict(
-              state_dict.get_dict_with_prefix(prefix));
-        }
+  AutoencoderKLOutput encode(const torch::Tensor& videos) {
+    torch::Tensor hidden_states;
+    if (use_slicing_) {
+      std::vector<torch::Tensor> latent_slices;
+      for (const auto& x_slice : videos.split(1)) {
+        latent_slices.push_back(encode_(x_slice));
       }
-
-      norm_out_->load_state_dict(state_dict.get_dict_with_prefix("norm_out."));
-      conv_out_->load_state_dict(state_dict.get_dict_with_prefix("conv_out."));
+      hidden_states = torch::cat(latent_slices, 0);
+    } else {
+      hidden_states = encode_(videos);
     }
+    auto posterior = DiagonalGaussianDistribution(hidden_states);
+    return AutoencoderKLOutput(posterior);
+  }
 
-    void verify_loaded_weights(const std::string& prefix) {
-      conv_in_->verify_loaded_weights("conv_in.");
-      mid_block_->verify_loaded_weights("mid_block.");
-
-      for (size_t i = 0; i < up_blocks_->size(); ++i) {
-        std::string p = "up_blocks." + std::to_string(i) + ".";
-        if (up_blocks_[i]->as<WanResidualUpBlock>())
-          up_blocks_[i]->as<WanResidualUpBlock>()->verify_loaded_weights(p);
-        else if (up_blocks_[i]->as<WanUpBlock>())
-          up_blocks_[i]->as<WanUpBlock>()->verify_loaded_weights(p);
-      }
-
-      norm_out_->verify_loaded_weights("norm_out.");
-      conv_out_->verify_loaded_weights("conv_out.");
-    }
-
-   private:
-    WanCausalConv3D conv_in_{nullptr};
-    WanMidBlock mid_block_{nullptr};
-    torch::nn::ModuleList up_blocks_{nullptr};
-    WanRMSNorm norm_out_{nullptr};
-    WanCausalConv3D conv_out_{nullptr};
-    torch::nn::Functional nonlinearity_{nullptr};
-    const int CACHE_T = 2;
-  };
-  TORCH_MODULE(WanVAEDecoder3D);
-
-  class WANVAEImpl : public torch::nn::Module {
-   public:
-    WANVAEImpl(const ModelContext& context,
-               torch::Device device,
-               torch::ScalarType dtype)
-        : args_(context.get_model_args()), device_(device), dtype_(dtype) {
-      encoder_ =
-          register_module("encoder",
-                          WanVAEEncoder3D(args_.vae_in_channels(),
-                                          args_.vae_base_dim(),
-                                          args_.vae_z_dim() * 2,
-                                          args_.vae_dim_mult(),
-                                          args_.vae_num_res_blocks(),
-                                          args_.vae_attn_scales(),
-                                          args_.vae_temporal_downsample(),
-                                          args_.vae_dropout(),
-                                          args_.vae_is_residual()));
-
-      decoder_ =
-          register_module("decoder",
-                          WanVAEDecoder3D(args_.vae_base_dim(),
-                                          args_.vae_z_dim(),
-                                          args_.vae_dim_mult(),
-                                          args_.vae_num_res_blocks(),
-                                          args_.vae_attn_scales(),
-                                          args_.vae_temporal_downsample(),
-                                          args_.vae_dropout(),
-                                          args_.vae_out_channels(),
-                                          args_.vae_is_residual()));
-
-      quant_conv_ =
-          register_module("quant_conv",
-                          WanCausalConv3D(2 * args_.z_dim(),
-                                          2 * args_.z_dim(),
-                                          std::vector<int64_t>{1, 1, 1}));
-
-      post_quant_conv_ = register_module(
-          "post_quant_conv",
-          WanCausalConv3D(
-              args_.z_dim(), args_.z_dim(), std::vector<int64_t>{1, 1, 1}));
-      init_cached_conv_count();
-
-      encoder_->to(dtype_);
-      decoder_->to(dtype_);
-      quant_conv_->to(dtype_);
-      post_quant_conv_->to(dtype_);
-    }
-
-    void enable_slicing(bool enable) { use_slicing_ = enable; }
-    void disable_slicing() { use_slicing_ = false; }
-
-    void clear_cache() {
-      conv_num_ = cached_conv_count_["decoder"];
-      conv_idx_ =
-          std::make_shared<std::vector<int64_t>>(std::vector<int64_t>{0});
-      feat_map_ = std::make_shared<std::vector<torch::Tensor>>(
-          std::vector<torch::Tensor>(enc_conv_num_));
-
-      enc_conv_num_ = cached_conv_count_["encoder"];
-      enc_conv_idx_ =
-          std::make_shared<std::vector<int64_t>>(std::vector<int64_t>{0});
-      enc_feat_map_ = std::make_shared<std::vector<torch::Tensor>>(
-          std::vector<torch::Tensor>(conv_num_));
-    }
-
-    // Encode video into latent representations
-    torch::Tensor encode_(const torch::Tensor& videos) {
-      int64_t num_frame = videos.size(2);
-      int64_t height = videos.size(3);
-      int64_t width = videos.size(4);
-      int64_t iter_ = 1 + (num_frame - 1) / 4;
-      clear_cache();
-      torch::Tensor out;
-
-      feat_map_ = std::make_shared<std::vector<torch::Tensor>>(
-          std::vector<torch::Tensor>(conv_num_));
-
-      for (int64_t i = 0; i < iter_; ++i) {
-        enc_conv_idx_ = {0};
-        if (i == 0) {
-          auto x_slice = videos.index({torch::indexing::Slice(),
-                                       torch::indexing::Slice(),
-                                       torch::indexing::Slice(0, 1),
-                                       torch::indexing::Slice(),
-                                       torch::indexing::Slice()});
-          out = encoder_(x_slice, enc_feat_map_, enc_conv_idx_);
-        } else {
-          int64_t start = 1 + 4 * (i - 1);
-          int64_t end = std::min(1 + 4 * i, num_frame);
-          auto x_slice = videos.index({torch::indexing::Slice(),
-                                       torch::indexing::Slice(),
-                                       torch::indexing::Slice(start, end),
-                                       torch::indexing::Slice(),
-                                       torch::indexing::Slice()});
-          auto out_ = encoder_(x_slice, enc_feat_map_, enc_conv_idx_);
-          out = torch::cat({out, out_}, 2);
-        }
-      }
-      out = quant_conv_(out);
-      clear_cache();
-      return out;
-    }
-
-    AutoencoderKLOutput encode(const torch::Tensor& videos) {
-      torch::Tensor hidden_states;
-      if (use_slicing_) {
-        std::vector<torch::Tensor> latent_slices;
-        for (const auto& x_slice : videos.split(1)) {
-          latent_slices.push_back(encode_(x_slice));
-        }
-        hidden_states = torch::cat(latent_slices, 0);
+  // Decode latent representations into videos
+  DecoderOutput decode_(const torch::Tensor& latents) {
+    torch::Tensor processed_latents = latents;
+    int64_t num_frame = latents.size(2);
+    int64_t height = latents.size(3);
+    int64_t width = latents.size(4);
+    clear_cache();
+    torch::Tensor out;
+    processed_latents = post_quant_conv_(processed_latents);
+    for (int64_t i = 0; i < num_frame; ++i) {
+      conv_idx_ = {0};
+      if (i == 0) {
+        auto x_slice =
+            processed_latents.index({torch::indexing::Slice(),
+                                     torch::indexing::Slice(),
+                                     torch::indexing::Slice(i, i + 1),
+                                     torch::indexing::Slice(),
+                                     torch::indexing::Slice()});
+        out = decoder_(x_slice, feat_map_, conv_idx_, true);  // first_chunk
       } else {
-        hidden_states = encode_(videos);
+        auto x_slice =
+            processed_latents.index({torch::indexing::Slice(),
+                                     torch::indexing::Slice(),
+                                     torch::indexing::Slice(i, i + 1),
+                                     torch::indexing::Slice(),
+                                     torch::indexing::Slice()});
+        auto out_ = decoder_(x_slice, feat_map_, conv_idx_);
+        out = torch::cat({out, out_}, 2);
       }
-      auto posterior = DiagonalGaussianDistribution(hidden_states);
-      return AutoencoderKLOutput(posterior);
+    }
+    auto dec = torch::clamp(out, -1.0f, 1.0f);
+    clear_cache();
+    return DecoderOutput(dec);
+  }
+
+  DecoderOutput decode(
+      const torch::Tensor& latents,
+      const std::optional<torch::Generator>& generator = std::nullopt) {
+    torch::Tensor videos;
+    if (use_slicing_ && latents.size(0) > 1) {
+      std::vector<torch::Tensor> video_slices;
+      for (const auto& latent_slice : latents.split(1)) {
+        video_slices.push_back(decode_(latent_slice).sample);
+      }
+      videos = torch::cat(video_slices, 0);
+    } else {
+      videos = decode_(latents).sample;
+    }
+    return DecoderOutput(videos);
+  }
+
+  DecoderOutput forward_(torch::Tensor sample, bool sample_posterior = false) {
+    torch::Tensor x = sample;
+    DiagonalGaussianDistribution posterior = encode(x).latent_dist;
+
+    if (sample_posterior) {
+      x = posterior.sample(42);
+    } else {
+      x = posterior.mode();
     }
 
-    // Decode latent representations into videos
-    DecoderOutput decode_(const torch::Tensor& latents) {
-      torch::Tensor processed_latents = latents;
-      int64_t num_frame = latents.size(2);
-      int64_t height = latents.size(3);
-      int64_t width = latents.size(4);
-      clear_cache();
-      torch::Tensor out;
-      processed_latents = post_quant_conv_(processed_latents);
-      for (int64_t i = 0; i < num_frame; ++i) {
-        conv_idx_ = {0};
-        if (i == 0) {
-          auto x_slice =
-              processed_latents.index({torch::indexing::Slice(),
-                                       torch::indexing::Slice(),
-                                       torch::indexing::Slice(i, i + 1),
-                                       torch::indexing::Slice(),
-                                       torch::indexing::Slice()});
-          out = decoder_(x_slice, feat_map_, conv_idx_, true);  // first_chunk
-        } else {
-          auto x_slice =
-              processed_latents.index({torch::indexing::Slice(),
-                                       torch::indexing::Slice(),
-                                       torch::indexing::Slice(i, i + 1),
-                                       torch::indexing::Slice(),
-                                       torch::indexing::Slice()});
-          auto out_ = decoder_(x_slice, feat_map_, conv_idx_);
-          out = torch::cat({out, out_}, 2);
+    return decode(x);
+  }
+
+  void load_model(std::unique_ptr<DiTFolderLoader> loader) {
+    for (const auto& state_dict : loader->get_state_dicts()) {
+      encoder_->load_state_dict(state_dict->get_dict_with_prefix("encoder."));
+      decoder_->load_state_dict(state_dict->get_dict_with_prefix("decoder."));
+      quant_conv_->load_state_dict(
+          state_dict->get_dict_with_prefix("quant_conv."));
+      post_quant_conv_->load_state_dict(
+          state_dict->get_dict_with_prefix("post_quant_conv."));
+    }
+    verify_loaded_weights("");
+  }
+
+  void verify_loaded_weights(const std::string& prefix) {
+    encoder_->verify_loaded_weights("encoder.");
+    decoder_->verify_loaded_weights("decoder.");
+    quant_conv_->verify_loaded_weights("quant_conv.");
+    post_quant_conv_->verify_loaded_weights("post_quant_conv.");
+  }
+
+ private:
+  bool is_quant_conv_loaded_ = false;
+  bool is_post_quant_conv_loaded_ = false;
+  WanVAEEncoder3D encoder_{nullptr};
+  WanVAEDecoder3D decoder_{nullptr};
+  WanCausalConv3D quant_conv_{nullptr};
+  WanCausalConv3D post_quant_conv_{nullptr};
+  bool use_slicing_{false};
+  ModelArgs args_;
+  torch::Device device_;
+  torch::ScalarType dtype_;
+  int64_t tile_sample_min_height_ = 256;
+  int64_t tile_sample_min_width_ = 256;
+  int64_t tile_sample_stride_height_ = 192;
+  int64_t tile_sample_stride_width_ = 192;
+  std::map<std::string, int> cached_conv_count_;
+  int64_t conv_num_ = 0;
+  std::shared_ptr<std::vector<int64_t>> conv_idx_;
+  std::shared_ptr<std::vector<torch::Tensor>> feat_map_;
+  int64_t enc_conv_num_ = 0;
+  std::shared_ptr<std::vector<int64_t>> enc_conv_idx_;
+  std::shared_ptr<std::vector<torch::Tensor>> enc_feat_map_;
+
+  void init_cached_conv_count() {
+    int decoder_count = 0;
+    int encoder_count = 0;
+    if (decoder_) {
+      for (const auto& m : decoder_->modules(/*include_self=*/false)) {
+        if (dynamic_cast<WanCausalConv3DImpl*>(m.get()) != nullptr) {
+          ++decoder_count;
         }
       }
-      auto dec = torch::clamp(out, -1.0f, 1.0f);
-      clear_cache();
-      return DecoderOutput(dec);
     }
-
-    DecoderOutput decode(
-        const torch::Tensor& latents,
-        const std::optional<torch::Generator>& generator = std::nullopt) {
-      torch::Tensor videos;
-      if (use_slicing_ && latents.size(0) > 1) {
-        std::vector<torch::Tensor> video_slices;
-        for (const auto& latent_slice : latents.split(1)) {
-          video_slices.push_back(decode_(latent_slice).sample);
-        }
-        videos = torch::cat(video_slices, 0);
-      } else {
-        videos = decode_(latents).sample;
-      }
-      return DecoderOutput(videos);
-    }
-
-    DecoderOutput forward_(torch::Tensor sample,
-                           bool sample_posterior = false) {
-      torch::Tensor x = sample;
-      DiagonalGaussianDistribution posterior = encode(x).latent_dist;
-
-      if (sample_posterior) {
-        x = posterior.sample(42);
-      } else {
-        x = posterior.mode();
-      }
-
-      return decode(x);
-    }
-
-    void load_model(std::unique_ptr<DiTFolderLoader> loader) {
-      for (const auto& state_dict : loader->get_state_dicts()) {
-        encoder_->load_state_dict(state_dict->get_dict_with_prefix("encoder."));
-        decoder_->load_state_dict(state_dict->get_dict_with_prefix("decoder."));
-        quant_conv_->load_state_dict(
-            state_dict->get_dict_with_prefix("quant_conv."));
-        post_quant_conv_->load_state_dict(
-            state_dict->get_dict_with_prefix("post_quant_conv."));
-      }
-      verify_loaded_weights("");
-    }
-
-    void verify_loaded_weights(const std::string& prefix) {
-      encoder_->verify_loaded_weights("encoder.");
-      decoder_->verify_loaded_weights("decoder.");
-      quant_conv_->verify_loaded_weights("quant_conv.");
-      post_quant_conv_->verify_loaded_weights("post_quant_conv.");
-    }
-
-   private:
-    bool is_quant_conv_loaded_ = false;
-    bool is_post_quant_conv_loaded_ = false;
-    WanVAEEncoder3D encoder_{nullptr};
-    WanVAEDecoder3D decoder_{nullptr};
-    WanCausalConv3D quant_conv_{nullptr};
-    WanCausalConv3D post_quant_conv_{nullptr};
-    bool use_slicing_{false};
-    ModelArgs args_;
-    torch::Device device_;
-    torch::ScalarType dtype_;
-    int64_t tile_sample_min_height_ = 256;
-    int64_t tile_sample_min_width_ = 256;
-    int64_t tile_sample_stride_height_ = 192;
-    int64_t tile_sample_stride_width_ = 192;
-    std::map<std::string, int> cached_conv_count_;
-    int64_t conv_num_ = 0;
-    std::shared_ptr<std::vector<int64_t>> conv_idx_;
-    std::shared_ptr<std::vector<torch::Tensor>> feat_map_;
-    int64_t enc_conv_num_ = 0;
-    std::shared_ptr<std::vector<int64_t>> enc_conv_idx_;
-    std::shared_ptr<std::vector<torch::Tensor>> enc_feat_map_;
-
-    void init_cached_conv_count() {
-      int decoder_count = 0;
-      int encoder_count = 0;
-      if (decoder_ != nullptr) {
-        for (const auto& m : decoder_->modules(/*include_self=*/false)) {
-          if (dynamic_cast<WanCausalConv3DImpl*>(m.get()) != nullptr) {
-            ++decoder_count;
-          }
+    if (encoder_) {
+      for (const auto& m : encoder_->modules(/*include_self=*/false)) {
+        if (dynamic_cast<WanCausalConv3DImpl*>(m.get()) != nullptr) {
+          ++encoder_count;
         }
       }
-      if (encoder_ != nullptr) {
-        for (const auto& m : encoder_->modules(/*include_self=*/false)) {
-          if (dynamic_cast<WanCausalConv3DImpl*>(m.get()) != nullptr) {
-            ++encoder_count;
-          }
-        }
-      }
-      cached_conv_count_["decoder"] = decoder_count;
-      cached_conv_count_["encoder"] = encoder_count;
     }
-  };
-  TORCH_MODULE(WANVAE);
+    cached_conv_count_["decoder"] = decoder_count;
+    cached_conv_count_["encoder"] = encoder_count;
+  }
+};
+TORCH_MODULE(WANVAE);
 
-  REGISTER_MODEL_ARGS(WANVAE, [&] {
-    LOAD_ARG_OR(vae_z_dim, "z_dim", 16);
-    LOAD_ARG_OR(vae_base_dim, "base_dim", 96);
-    LOAD_ARG_OR(vae_num_res_blocks, "num_res_blocks", 2);
-    LOAD_ARG_OR(vae_temporal_downsample,
-                "temporal_downsample",
-                (std::vector<bool>{false, true, true}));
-    LOAD_ARG_OR(vae_attn_scale, "attn_scale", (std::vector<float>{}));
-    LOAD_ARG_OR(vae_dim_mults, "dim_mults", (std::vector<int>{1, 2, 4, 4}));
-    LOAD_ARG_OR(vae_dropout, "dropout", 0.0f);
-    LOAD_ARG_OR(vae_in_channels, "in_channels", 3);
-    LOAD_ARG_OR(vae_out_channels, "out_channels", 3);
-    LOAD_ARG_OR(vae_is_residual, "is_residual", false);
-    LOAD_ARG_OR(vae_scale_factor_temporal, "scale_factor_temporal", 4);
-    LOAD_ARG_OR(vae_scale_factor_spatial, "scale_factor_spatial", 8);
-    LOAD_ARG_OR(vae_latents_mean,
-                "latents_mean",
-                (std::vector<double>{-0.7571,
-                                     -0.7089,
-                                     -0.9113,
-                                     0.1075,
-                                     -0.1745,
-                                     0.9653,
-                                     -0.1517,
-                                     1.5508,
-                                     0.4134,
-                                     -0.0715,
-                                     0.5517,
-                                     -0.3632,
-                                     -0.1922,
-                                     -0.9497,
-                                     0.2503,
-                                     -0.2921}));
-    LOAD_ARG_OR(vae_latents_std,
-                "latents_std",
-                (std::vector<double>{2.8184,
-                                     1.4541,
-                                     2.3275,
-                                     2.6558,
-                                     1.2196,
-                                     1.7708,
-                                     2.6052,
-                                     2.0743,
-                                     3.2687,
-                                     2.1526,
-                                     2.8652,
-                                     1.5579,
-                                     1.6382,
-                                     1.1253,
-                                     2.8251,
-                                     1.916}));
-  });
+REGISTER_MODEL_ARGS(WANVAE, [&] {
+  LOAD_ARG_OR(vae_z_dim, "z_dim", 16);
+  LOAD_ARG_OR(vae_base_dim, "base_dim", 96);
+  LOAD_ARG_OR(vae_num_res_blocks, "num_res_blocks", 2);
+  LOAD_ARG_OR(vae_temporal_downsample,
+              "temporal_downsample",
+              (std::vector<bool>{false, true, true}));
+  LOAD_ARG_OR(vae_attn_scales, "attn_scale", (std::vector<double>{}));
+  LOAD_ARG_OR(vae_dim_mult, "dim_mults", (std::vector<int64_t>{1, 2, 4, 4}));
+  LOAD_ARG_OR(vae_dropout, "dropout", 0.0f);
+  LOAD_ARG_OR(vae_in_channels, "in_channels", 3);
+  LOAD_ARG_OR(vae_out_channels, "out_channels", 3);
+  LOAD_ARG_OR(vae_is_residual, "is_residual", false);
+  LOAD_ARG_OR(vae_scale_factor_temporal, "scale_factor_temporal", 4);
+  LOAD_ARG_OR(vae_scale_factor_spatial, "scale_factor_spatial", 8);
+  LOAD_ARG_OR(vae_latents_mean,
+              "latents_mean",
+              (std::vector<double>{-0.7571,
+                                   -0.7089,
+                                   -0.9113,
+                                   0.1075,
+                                   -0.1745,
+                                   0.9653,
+                                   -0.1517,
+                                   1.5508,
+                                   0.4134,
+                                   -0.0715,
+                                   0.5517,
+                                   -0.3632,
+                                   -0.1922,
+                                   -0.9497,
+                                   0.2503,
+                                   -0.2921}));
+  LOAD_ARG_OR(vae_latents_std,
+              "latents_std",
+              (std::vector<double>{2.8184,
+                                   1.4541,
+                                   2.3275,
+                                   2.6558,
+                                   1.2196,
+                                   1.7708,
+                                   2.6052,
+                                   2.0743,
+                                   3.2687,
+                                   2.1526,
+                                   2.8652,
+                                   1.5579,
+                                   1.6382,
+                                   1.1253,
+                                   2.8251,
+                                   1.916}));
+});
 
 }  // namespace xllm

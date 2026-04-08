@@ -205,10 +205,21 @@ class UniPCMultiStepSchedulerImpl : public torch::nn::Module {
     } else {
       torch::Tensor sigmas_all =
           ((1 - alphas_cumprod_) / alphas_cumprod_).sqrt();
-      sigmas_tensor =
-          torch::interp(timesteps_tensor.to(torch::kFloat32),
-                        torch::arange(0, sigmas_all.size(0), torch::kFloat32),
-                        sigmas_all);
+      // 1D linear interpolation (equivalent to numpy.interp / torch.interp)
+      auto xp = torch::arange(0, sigmas_all.size(0), torch::kFloat32);
+      auto fp = sigmas_all.to(torch::kFloat32);
+      auto x = timesteps_tensor.to(torch::kFloat32);
+      // Clamp x to xp range
+      x = torch::clamp(x, xp[0].item<float>(), xp[-1].item<float>());
+      // Find indices
+      auto indices = torch::searchsorted(xp, x);
+      indices = torch::clamp(indices, 1, static_cast<int64_t>(xp.size(0)) - 1);
+      auto x_lo = xp.index({indices - 1});
+      auto x_hi = xp.index({indices});
+      auto y_lo = fp.index({indices - 1});
+      auto y_hi = fp.index({indices});
+      auto slope = (y_hi - y_lo) / (x_hi - x_lo);
+      sigmas_tensor = y_lo + slope * (x - x_lo);
 
       float sigma_last;
       if (final_sigmas_type_ == "sigma_min") {
@@ -241,7 +252,8 @@ class UniPCMultiStepSchedulerImpl : public torch::nn::Module {
 
   torch::Tensor step(const torch::Tensor& model_output,
                      const torch::Tensor& timestep,
-                     const torch::Tensor& sample) {
+                     const torch::Tensor& sample_const) {
+    torch::Tensor sample = sample_const;
     if (num_inference_steps_ <= 0) {
       LOG(FATAL)
           << "Number of inference steps is not set, run 'set_timesteps' first";
@@ -426,7 +438,7 @@ class UniPCMultiStepSchedulerImpl : public torch::nn::Module {
   torch::Tensor time_shift(float mu, float sigma, const torch::Tensor& t) {
     if (time_shift_type_ == "exponential") {
       return time_shift_exponential(mu, sigma, t);
-    } else if (time_shift_type_ == "linear") {
+    } else {
       return time_shift_linear(mu, sigma, t);
     }
   }
@@ -519,8 +531,8 @@ class UniPCMultiStepSchedulerImpl : public torch::nn::Module {
     sample_float = sample_float.reshape({batch_size, -1});
     torch::Tensor abs_sample = sample_float.abs();
 
-    torch::Tensor s = std::get<0>(
-        torch::quantile(abs_sample, dynamic_thresholding_ratio_, 1));
+    torch::Tensor s =
+        torch::quantile(abs_sample, dynamic_thresholding_ratio_, 1);
     s = torch::clamp(s, 1.0f, sample_max_value_);
     s = s.unsqueeze(1);
 
@@ -597,8 +609,7 @@ class UniPCMultiStepSchedulerImpl : public torch::nn::Module {
         torch::Tensor R_sub = R_tensor.slice(0, 0, R_tensor.size(0) - 1)
                                   .slice(1, 0, R_tensor.size(1) - 1);
         torch::Tensor b_sub = b_tensor.slice(0, 0, b_tensor.size(0) - 1);
-        rhos_p =
-            std::get<0>(torch::linalg_solve(R_sub, b_sub)).to(sample.dtype());
+        rhos_p = torch::linalg_solve(R_sub, b_sub).to(sample.dtype());
       }
     }
 
@@ -692,8 +703,7 @@ class UniPCMultiStepSchedulerImpl : public torch::nn::Module {
     if (order == 1) {
       rhos_c = torch::tensor({0.5f}, x.dtype()).to(device);
     } else {
-      rhos_c =
-          std::get<0>(torch::linalg_solve(R_tensor, b_tensor)).to(x.dtype());
+      rhos_c = torch::linalg_solve(R_tensor, b_tensor).to(x.dtype());
     }
 
     torch::Tensor x_t_;
@@ -741,7 +751,6 @@ class UniPCMultiStepSchedulerImpl : public torch::nn::Module {
   bool predict_x0_;
   std::string solver_type_;
   bool lower_order_final_;
-  std::vector<int64_t> disable_corrector_;
   bool use_karras_sigmas_;
   bool use_exponential_sigmas_;
   bool use_beta_sigmas_;
