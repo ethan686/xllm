@@ -400,6 +400,18 @@ struct ModelArgs {
   PROPERTY(bool, use_quant_conv) = false;
   PROPERTY(bool, use_post_quant_conv) = false;
 
+  // Wan_2.2_ VAE related args
+  PROPERTY(int64_t, vae_in_channels) = -1;
+  PROPERTY(int64_t, vae_out_channels) = -1;
+  PROPERTY(int64_t, vae_base_dim) = 0;
+  PROPERTY(int64_t, vae_z_dim) = 0;
+  PROPERTY(std::vector<int64_t>, vae_dim_mult) = {};
+  PROPERTY(int64_t, vae_num_res_blocks) = 0;
+  PROPERTY(std::vector<double>, vae_attn_scales) = {};
+  PROPERTY(std::vector<bool>, vae_temporal_downsample) = {};
+  PROPERTY(double, vae_dropout) = 0.0;
+  PROPERTY(bool, vae_is_residual) = false;
+
   // dit related args
   PROPERTY(int64_t, joint_attention_dim) = 0;
   PROPERTY(int64_t, pooled_projection_dim) = 0;
