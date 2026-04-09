@@ -186,11 +186,13 @@ class VAEImageProcessorImpl : public torch::nn::Module {
   torch::Tensor resize(const torch::Tensor& image,
                        int64_t target_height,
                        int64_t target_width) const {
-    return torch::nn::functional::interpolate(
-        image,
+    auto img = image.unsqueeze(0);  // Add batch dim for 2D interpolation
+    auto resized = torch::nn::functional::interpolate(
+        img,
         torch::nn::functional::InterpolateFuncOptions()
             .size(std::vector<int64_t>{target_height, target_width})
             .mode(torch::kNearest));
+    return resized.squeeze(0);
   }
 
  private:

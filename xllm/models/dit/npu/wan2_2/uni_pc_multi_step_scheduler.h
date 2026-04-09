@@ -825,4 +825,34 @@ REGISTER_MODEL_ARGS(UniPCMultiStepScheduler, [&] {
   LOAD_ARG_OR(shift_terminal, "shift_terminal", false);
 });
 
+// Register with the _class_name from config (lowercase 'step')
+REGISTER_MODEL_ARGS(UniPCMultistepScheduler, [&] {
+  LOAD_ARG_OR(num_train_timesteps, "num_train_timesteps", 1000);
+  LOAD_ARG_OR(beta_start, "beta_start", 0.0001f);
+  LOAD_ARG_OR(beta_end, "beta_end", 0.02f);
+  LOAD_ARG_OR(beta_schedule, "beta_schedule", "linear");
+  LOAD_ARG_OR(trained_betas, "trained_betas", std::vector<float>{});
+  LOAD_ARG_OR(solver_order, "solver_order", 2);
+  LOAD_ARG_OR(prediction_type, "prediction_type", "flow_prediction");
+  LOAD_ARG_OR(thresholding, "thresholding", false);
+  LOAD_ARG_OR(dynamic_thresholding_ratio, "dynamic_thresholding_ratio", 0.995f);
+  LOAD_ARG_OR(sample_max_value, "sample_max_value", 1.0f);
+  LOAD_ARG_OR(predict_x0, "predict_x0", true);
+  LOAD_ARG_OR(solver_type, "solver_type", "bh2");
+  LOAD_ARG_OR(lower_order_final, "lower_order_final", true);
+  LOAD_ARG_OR(disable_corrector, "disable_corrector", std::vector<int64_t>{});
+  LOAD_ARG_OR(use_karras_sigmas, "use_karras_sigmas", false);
+  LOAD_ARG_OR(use_exponential_sigmas, "use_exponential_sigmas", false);
+  LOAD_ARG_OR(use_beta_sigmas, "use_beta_sigmas", false);
+  LOAD_ARG_OR(use_flow_sigmas, "use_flow_sigmas", true);
+  LOAD_ARG_OR(flow_shift, "flow_shift", 3.0f);
+  LOAD_ARG_OR(timestep_spacing, "timestep_spacing", "linspace");
+  LOAD_ARG_OR(steps_offset, "steps_offset", 0);
+  LOAD_ARG_OR(final_sigmas_type, "final_sigmas_type", "zero");
+  LOAD_ARG_OR(rescale_betas_zero_snr, "rescale_betas_zero_snr", false);
+  LOAD_ARG_OR(sigma_min, "sigma_min", 0.0f);
+  LOAD_ARG_OR(sigma_max, "sigma_max", 0.0f);
+  LOAD_ARG_OR(shift_terminal, "shift_terminal", false);
+});
+
 }  // namespace xllm

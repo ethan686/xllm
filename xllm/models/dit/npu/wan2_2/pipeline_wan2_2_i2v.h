@@ -414,10 +414,27 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
     torch::Tensor timesteps = scheduler_->timesteps();
 
     int64_t num_channels_latents = zdim_;
+    torch::Tensor input_image;
+    if (images.has_value()) {
+      input_image = images.value();
+    } else {
+      // No input image provided — create a blank white image (C=3, H, W)
+      LOG(WARNING) << "No input image provided for I2V pipeline. "
+                   << "Using blank white image as fallback.";
+      input_image = torch::ones({3, height, width}, torch::kFloat32);
+    }
     torch::Tensor preprocessed_image =
-        video_processor_->preprocess(images.value(), height, width);
+        video_processor_->preprocess(input_image, height, width);
     preprocessed_image =
         preprocessed_image.to(options_.device(), torch::kFloat32);
+    // Ensure 5D: (B, C, T, H, W)
+    if (preprocessed_image.dim() == 3) {
+      // (C, H, W) -> (1, C, 1, H, W)
+      preprocessed_image = preprocessed_image.unsqueeze(0).unsqueeze(2);
+    } else if (preprocessed_image.dim() == 4) {
+      // (B, C, H, W) -> (B, C, 1, H, W)
+      preprocessed_image = preprocessed_image.unsqueeze(2);
+    }
 
     std::optional<torch::Tensor> preprocessed_last_image;
     if (last_images.has_value()) {

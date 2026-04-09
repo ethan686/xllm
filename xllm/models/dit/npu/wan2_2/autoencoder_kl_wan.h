@@ -5,6 +5,7 @@
 #include <torch/nn/modules/normalization.h>
 #include <torch/torch.h>
 
+#include <algorithm>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -238,13 +239,19 @@ class WanRMSNormImpl : public torch::nn::Module {
 
   void load_state_dict(const StateDict& state_dict) {
     weight::load_weight(state_dict, "gamma", gamma_, is_weight_loaded_);
-    weight::load_weight(state_dict, "bias", bias_, is_bias_loaded_);
+    if (bias_enabled_) {
+      weight::load_weight(state_dict, "bias", bias_, is_bias_loaded_);
+    } else {
+      is_bias_loaded_ = true;
+    }
   }
 
   void verify_loaded_weights(const std::string& prefix) const {
     CHECK(is_weight_loaded_)
         << "weight is not loaded for " << prefix + "weight";
-    CHECK(is_bias_loaded_) << "bias is not loaded for " << prefix + "bias";
+    if (bias_enabled_) {
+      CHECK(is_bias_loaded_) << "bias is not loaded for " << prefix + "bias";
+    }
   }
 
  private:
@@ -381,6 +388,8 @@ class WanResampleImpl : public torch::nn::Module {
     }
     t = x.size(2);
     x = x.permute({0, 2, 1, 3, 4}).reshape({b * t, c, h, w});
+    LOG(INFO) << "WanResample mode=" << mode_
+              << " pre-resample shape: " << x.sizes();
     x = resample_->forward(x);
     x = x.view({b, t, x.size(1), x.size(2), x.size(3)})
             .permute({0, 2, 1, 3, 4});
@@ -1196,7 +1205,7 @@ class WanUpBlockImpl : public torch::nn::Module {
     }
 
     if (upsamplers_) {
-      for (size_t i = 0; i < resnets_->size(); i++) {
+      for (size_t i = 0; i < upsamplers_->size(); i++) {
         auto prefix = "upsamplers." + std::to_string(i) + ".";
         upsamplers_[i]->as<WanResample>()->verify_loaded_weights(prefix);
       }
@@ -1230,7 +1239,6 @@ class WanVAEDecoder3DImpl : public torch::nn::Module {
     for (auto it = dim_mult.rbegin(); it != dim_mult.rend(); ++it) {
       dims.push_back(dim * (*it));
     }
-    dims.erase(dims.begin());
     conv_in_ = register_module("conv_in",
                                WanCausalConv3D(z_dim,
                                                dims[0],
@@ -1366,12 +1374,15 @@ class WanVAEDecoder3DImpl : public torch::nn::Module {
   }
 
   void load_state_dict(const StateDict& state_dict) {
+    LOG(INFO) << "Decoder::load_state_dict, up_blocks count="
+              << up_blocks_->size();
     conv_in_->load_state_dict(state_dict.get_dict_with_prefix("conv_in."));
     mid_block_->load_state_dict(state_dict.get_dict_with_prefix("mid_block."));
 
     // Safely load weights of up_blocks :
     for (size_t i = 0; i < up_blocks_->size(); ++i) {
       std::string prefix = "up_blocks." + std::to_string(i) + ".";
+      LOG(INFO) << "Loading up_block[" << i << "]...";
 
       if (up_blocks_[i]->as<WanResidualUpBlock>()) {
         up_blocks_[i]->as<WanResidualUpBlock>()->load_state_dict(
@@ -1381,7 +1392,7 @@ class WanVAEDecoder3DImpl : public torch::nn::Module {
             state_dict.get_dict_with_prefix(prefix));
       }
     }
-
+    LOG(INFO) << "Loading norm_out and conv_out...";
     norm_out_->load_state_dict(state_dict.get_dict_with_prefix("norm_out."));
     conv_out_->load_state_dict(state_dict.get_dict_with_prefix("conv_out."));
   }
@@ -1419,6 +1430,13 @@ class WANVAEImpl : public torch::nn::Module {
       : args_(context.get_model_args()),
         device_(context.get_tensor_options().device()),
         dtype_(context.get_tensor_options().dtype().toScalarType()) {
+    LOG(INFO) << "WANVAE args: vae_in_channels=" << args_.vae_in_channels()
+              << " vae_base_dim=" << args_.vae_base_dim()
+              << " vae_z_dim=" << args_.vae_z_dim()
+              << " vae_dim_mult size=" << args_.vae_dim_mult().size()
+              << " vae_num_res_blocks=" << args_.vae_num_res_blocks()
+              << " vae_dropout=" << args_.vae_dropout()
+              << " vae_is_residual=" << args_.vae_is_residual();
     encoder_ = register_module("encoder",
                                WanVAEEncoder3D(args_.vae_in_channels(),
                                                args_.vae_base_dim(),
@@ -1430,13 +1448,17 @@ class WANVAEImpl : public torch::nn::Module {
                                                args_.vae_dropout(),
                                                args_.vae_is_residual()));
 
+    // Decoder temporal pattern is the reverse of encoder's downsample pattern
+    auto decoder_temporal = args_.vae_temporal_downsample();
+    std::reverse(decoder_temporal.begin(), decoder_temporal.end());
+
     decoder_ = register_module("decoder",
                                WanVAEDecoder3D(args_.vae_base_dim(),
                                                args_.vae_z_dim(),
                                                args_.vae_dim_mult(),
                                                args_.vae_num_res_blocks(),
                                                args_.vae_attn_scales(),
-                                               args_.vae_temporal_downsample(),
+                                               decoder_temporal,
                                                args_.vae_dropout(),
                                                args_.vae_out_channels(),
                                                args_.vae_is_residual()));
@@ -1593,15 +1615,22 @@ class WANVAEImpl : public torch::nn::Module {
   }
 
   void load_model(std::unique_ptr<DiTFolderLoader> loader) {
+    LOG(INFO) << "WANVAE::load_model starting";
     for (const auto& state_dict : loader->get_state_dicts()) {
+      LOG(INFO) << "Loading encoder weights...";
       encoder_->load_state_dict(state_dict->get_dict_with_prefix("encoder."));
+      LOG(INFO) << "Loading decoder weights...";
       decoder_->load_state_dict(state_dict->get_dict_with_prefix("decoder."));
+      LOG(INFO) << "Loading quant_conv weights...";
       quant_conv_->load_state_dict(
           state_dict->get_dict_with_prefix("quant_conv."));
+      LOG(INFO) << "Loading post_quant_conv weights...";
       post_quant_conv_->load_state_dict(
           state_dict->get_dict_with_prefix("post_quant_conv."));
     }
+    LOG(INFO) << "Verifying weights...";
     verify_loaded_weights("");
+    LOG(INFO) << "WANVAE::load_model complete";
   }
 
   void verify_loaded_weights(const std::string& prefix) {
@@ -1659,6 +1688,7 @@ TORCH_MODULE(WANVAE);
 
 REGISTER_MODEL_ARGS(WANVAE, [&] {
   LOAD_ARG_OR(vae_z_dim, "z_dim", 16);
+  LOAD_ARG_OR(z_dim, "z_dim", 16);
   LOAD_ARG_OR(vae_base_dim, "base_dim", 96);
   LOAD_ARG_OR(vae_num_res_blocks, "num_res_blocks", 2);
   LOAD_ARG_OR(vae_temporal_downsample,
@@ -1708,6 +1738,25 @@ REGISTER_MODEL_ARGS(WANVAE, [&] {
                                    1.1253,
                                    2.8251,
                                    1.916}));
+});
+
+// Register with the _class_name from model_index.json / config.json
+REGISTER_MODEL_ARGS(AutoencoderKLWan, [&] {
+  LOAD_ARG_OR(vae_z_dim, "z_dim", 16);
+  LOAD_ARG_OR(z_dim, "z_dim", 16);
+  LOAD_ARG_OR(vae_base_dim, "base_dim", 96);
+  LOAD_ARG_OR(vae_num_res_blocks, "num_res_blocks", 2);
+  LOAD_ARG_OR(vae_temporal_downsample,
+              "temperal_downsample",
+              (std::vector<bool>{true, true, false}));
+  LOAD_ARG_OR(vae_attn_scales, "attn_scales", (std::vector<double>{}));
+  LOAD_ARG_OR(vae_dim_mult, "dim_mult", (std::vector<int64_t>{1, 2, 4, 4}));
+  LOAD_ARG_OR(vae_dropout, "dropout", 0.0f);
+  LOAD_ARG_OR(vae_in_channels, "in_channels", 3);
+  LOAD_ARG_OR(vae_out_channels, "out_channels", 3);
+  LOAD_ARG_OR(vae_is_residual, "is_residual", false);
+  LOAD_ARG_OR(vae_scale_factor_temporal, "scale_factor_temporal", 4);
+  LOAD_ARG_OR(vae_scale_factor_spatial, "scale_factor_spatial", 8);
 });
 
 }  // namespace xllm
