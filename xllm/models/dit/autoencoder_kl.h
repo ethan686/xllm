@@ -117,6 +117,8 @@ class VAEImageProcessorImpl : public torch::nn::Module {
       }
     }
     int channel = processed.size(1);
+    LOG(INFO) << "latent_channels_ 的值为：" << latent_channels_;
+    LOG(INFO) << "processed 张量形状: " << processed.sizes();
     if (channel == latent_channels_) {
       return image;
     }
@@ -186,13 +188,19 @@ class VAEImageProcessorImpl : public torch::nn::Module {
   torch::Tensor resize(const torch::Tensor& image,
                        int64_t target_height,
                        int64_t target_width) const {
-    auto img = image.unsqueeze(0);  // Add batch dim for 2D interpolation
+    // Save original dim
+    const auto orig_dim = image.dim();
+
+    // Check if 4D tensor (batch, channel, height, width)
+    auto img = orig_dim == 3 ? image.unsqueeze(0) : image;
+
     auto resized = torch::nn::functional::interpolate(
         img,
         torch::nn::functional::InterpolateFuncOptions()
             .size(std::vector<int64_t>{target_height, target_width})
             .mode(torch::kNearest));
-    return resized.squeeze(0);
+
+    return orig_dim == 3 ? resized.squeeze(0) : resized;
   }
 
  private:
