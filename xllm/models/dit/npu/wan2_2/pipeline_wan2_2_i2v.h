@@ -39,8 +39,10 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
     options_ = context.get_tensor_options();
     const auto& vae_args = context.get_model_args("vae");
     zdim_ = vae_args.z_dim();
-    latents_mean_ = vae_args.latents_mean();
-    latents_std_ = vae_args.latents_std();
+    latents_mean_ = vae_args.vae_latents_mean();
+    latents_std_ = vae_args.vae_latents_std();
+    LOG(INFO) << "Pipeline loaded latents_mean size=" << latents_mean_.size()
+              << " latents_std size=" << latents_std_.size();
 
     const auto& scheduler_args = context.get_model_args("scheduler");
     num_train_timesteps_ = scheduler_args.num_train_timesteps();
@@ -98,7 +100,7 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
                                negative_prompts,
                                generation_params.height,
                                generation_params.width,
-                               /*num_frames=*/16,
+                               /*num_frames=*/81,
                                generation_params.num_inference_steps,
                                generation_params.guidance_scale,
                                /*guidance_scale_2=*/-1.0f,
@@ -184,6 +186,8 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
       video_condition = torch::cat({image, zeros, last_img}, 2);
     }
     video_condition = video_condition.to(options_.device(), options_.dtype());
+    LOG(INFO) << "video_condition shape=" << video_condition.sizes()
+              << " device=" << video_condition.device();
 
     torch::Tensor latents_mean =
         torch::tensor(latents_mean_, torch::dtype(torch::kFloat32))
@@ -194,8 +198,15 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
                   .view({1, num_channels_latents, 1, 1, 1})
                   .to(latents_tensor.device(), latents_tensor.dtype());
 
-    torch::Tensor latent_condition =
-        vae_->encode(video_condition).latent_dist.mode();
+    torch::Tensor latent_condition;
+    try {
+      latent_condition = vae_->encode(video_condition).latent_dist.mode();
+    } catch (const std::exception& e) {
+      LOG(ERROR) << "VAE encode failed: " << e.what()
+                 << " video_condition device=" << video_condition.device()
+                 << " shape=" << video_condition.sizes();
+      throw;
+    }
     latent_condition = (latent_condition - latents_mean) * latents_std;
 
     if (latent_condition.size(0) == 1 && batch_size > 1) {
@@ -369,6 +380,8 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
 
     bool do_classifier_free_guidance = guidance_scale > 1.0f;
 
+    LOG(INFO) << "num_frames 的值为：" << num_frames;
+
     if (num_frames % vae_scale_factor_temporal_ != 1) {
       LOG(WARNING) << "num_frames - 1 has to be divisible by "
                    << vae_scale_factor_temporal_
@@ -408,13 +421,18 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
                       num_videos_per_prompt,
                       max_sequence_length);
 
+    LOG(INFO) << "现在我跑完了embedding模块哦哦哦哦噢噢噢噢噢噢噢噢噢噢噢噢噢噢"
+                 "噢噢哦哦哦";
     // wan2.2 image_dimm is null, so not use the encode_image function
 
     scheduler_->set_timesteps(num_inference_steps, options_.device());
+    LOG(INFO) << "————————————————————428——————————————————————";
     torch::Tensor timesteps = scheduler_->timesteps();
+    LOG(INFO) << "————————————————————430————————————————————————";
 
     int64_t num_channels_latents = zdim_;
     torch::Tensor input_image;
+
     if (images.has_value()) {
       input_image = images.value();
     } else {
@@ -423,25 +441,35 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
                    << "Using blank white image as fallback.";
       input_image = torch::ones({3, height, width}, torch::kFloat32);
     }
+    LOG(INFO) << "input_image张量形状: " << input_image.sizes();
+    LOG(INFO) << "————————————————————442————————————————————————";
     torch::Tensor preprocessed_image =
         video_processor_->preprocess(input_image, height, width);
+    LOG(INFO) << "————————————————————445————————————————————————";
     preprocessed_image =
         preprocessed_image.to(options_.device(), torch::kFloat32);
-    // Ensure 5D: (B, C, T, H, W)
+
+    LOG(INFO) << "现在我跑完了提示词preprocess模块哦哦哦哦噢噢噢噢噢噢噢噢噢噢"
+                 "噢噢噢噢噢噢哦哦哦";
+
+    // Ensure 4D: (B, C, H, W) — prepare_latents will add time dim
     if (preprocessed_image.dim() == 3) {
-      // (C, H, W) -> (1, C, 1, H, W)
-      preprocessed_image = preprocessed_image.unsqueeze(0).unsqueeze(2);
-    } else if (preprocessed_image.dim() == 4) {
-      // (B, C, H, W) -> (B, C, 1, H, W)
-      preprocessed_image = preprocessed_image.unsqueeze(2);
+      // (C, H, W) -> (1, C, H, W)
+      preprocessed_image = preprocessed_image.unsqueeze(0);
     }
 
     std::optional<torch::Tensor> preprocessed_last_image;
     if (last_images.has_value()) {
       torch::Tensor last_img =
           video_processor_->preprocess(last_images.value(), height, width);
-      preprocessed_last_image = last_img.to(options_.device(), torch::kFloat32);
+      last_img = last_img.to(options_.device(), torch::kFloat32);
+      if (last_img.dim() == 3) {
+        last_img = last_img.unsqueeze(0);
+      }
+      preprocessed_last_image = last_img;
     }
+    LOG(INFO) << "现在我要准备latents了————————————————————————————————————————"
+                 "——————————————————————";
 
     torch::Tensor prepared_latents, latent_condition, first_frame_mask;
     std::tie(prepared_latents, latent_condition, first_frame_mask) =
@@ -454,6 +482,9 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
                         preprocessed_last_image,
                         seed,
                         latents);
+
+    LOG(INFO) << "现在我跑完了prepare_"
+                 "latents模块哦哦哦哦噢噢噢噢噢噢噢噢噢噢噢噢噢噢噢噢哦哦哦";
 
     float boundary_timestep =
         boundary_ratio_ > 0.0f ? boundary_ratio_ * num_train_timesteps_ : -1.0f;
@@ -471,9 +502,13 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
         current_model = transformer_2_;
         current_guidance = guidance_scale_2;
       }
+      LOG(INFO) << "________________________去噪步数选择dit完毕________________"
+                   "____________________";
 
       torch::Tensor latent_model_input;
       torch::Tensor timestep_input;
+      LOG(INFO) << "________________________timesteps__________________________"
+                   "__________";
 
       if (expand_timesteps_) {
         latent_model_input = (1 - first_frame_mask) * latent_condition +
@@ -493,11 +528,15 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
         latent_model_input = latent_model_input.to(prepared_latents.dtype());
         timestep_input = t.expand(prepared_latents.size(0));
       }
+      LOG(INFO) << "________________________开始去噪___________________________"
+                   "_________";
 
       torch::Tensor noise_pred = current_model->forward(latent_model_input,
                                                         timestep_input,
                                                         encoded_prompt_embeds,
                                                         torch::Tensor());
+      LOG(INFO) << "________________________结束去噪___________________________"
+                   "_________";
 
       if (do_classifier_free_guidance) {
         torch::Tensor noise_uncond =

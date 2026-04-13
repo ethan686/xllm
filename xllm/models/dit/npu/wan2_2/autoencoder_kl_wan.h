@@ -167,7 +167,7 @@ class WanCausalConv3DImpl : public torch::nn::Module {
       const torch::optional<torch::Tensor>& cache_x = torch::nullopt) {
     std::vector<int64_t> padding = _padding_;
     torch::Tensor input = x;
-    if (cache_x.has_value() && padding[4] > 0) {
+    if (cache_x.has_value() && cache_x.value().defined() && padding[4] > 0) {
       torch::Tensor cache = cache_x.value().to(x.device());
       input = torch::cat({cache, input}, 2);
       padding[4] -= cache.size(2);
@@ -266,6 +266,25 @@ class WanRMSNormImpl : public torch::nn::Module {
 };
 TORCH_MODULE(WanRMSNorm);
 
+class WanUpsampleImpl : public torch::nn::Module {
+ public:
+  WanUpsampleImpl(const torch::nn::functional::InterpolateFuncOptions options)
+      : options_(options) {}
+
+  torch::Tensor forward(const torch::Tensor& x) {
+    // auto result = upsample_(x.to(torch::kFloat));
+    auto result =
+        torch::nn::functional::interpolate(x.to(torch::kFloat), options_);
+    return result.to(x.dtype());
+  }
+
+ private:
+  torch::nn::functional::InterpolateFuncOptions options_;
+  torch::nn::Upsample upsample_ = nullptr;
+};
+
+TORCH_MODULE(WanUpsample);
+
 class WanResampleImpl : public torch::nn::Module {
  public:
   WanResampleImpl(int64_t dim,
@@ -278,16 +297,16 @@ class WanResampleImpl : public torch::nn::Module {
     torch::nn::Sequential resample;
     if (mode == "upsample2d") {
       resample = torch::nn::Sequential(
-          torch::nn::Upsample(torch::nn::UpsampleOptions()
-                                  .scale_factor(std::vector<double>{2.0, 2.0})
-                                  .mode(torch::kNearest)),
+          WanUpsample(torch::nn::functional::InterpolateFuncOptions()
+                          .scale_factor(std::vector<double>{2.0, 2.0})
+                          .mode(torch::kNearestExact)),
           torch::nn::Conv2d(
               torch::nn::Conv2dOptions(dim, upsample_out_dim, 3).padding(1)));
     } else if (mode == "upsample3d") {
       resample = torch::nn::Sequential(
-          torch::nn::Upsample(torch::nn::UpsampleOptions()
-                                  .scale_factor(std::vector<double>{2.0, 2.0})
-                                  .mode(torch::kNearest)),
+          WanUpsample(torch::nn::functional::InterpolateFuncOptions()
+                          .scale_factor(std::vector<double>{2.0, 2.0})
+                          .mode(torch::kNearestExact)),
           torch::nn::Conv2d(
               torch::nn::Conv2dOptions(dim, upsample_out_dim, 3).padding(1)));
       time_conv_ =
@@ -910,6 +929,7 @@ class WanVAEEncoder3DImpl : public torch::nn::Module {
       std::shared_ptr<std::vector<torch::Tensor>> feat_cache = nullptr,
       std::shared_ptr<std::vector<int64_t>> feat_idx = nullptr) {
     if (!feat_idx) feat_idx = std::make_shared<std::vector<int64_t>>(1, 0);
+    LOG(INFO) << "————————————————————VAEEncoder1————————————————————————";
 
     if (feat_cache) {
       int64_t idx = (*feat_idx)[0];
@@ -932,12 +952,16 @@ class WanVAEEncoder3DImpl : public torch::nn::Module {
                               cache_x},
                              2);
       }
+      LOG(INFO) << "————————————————————VAEEncoder2————————————————————————";
       x = conv_in_->forward(x, (*feat_cache)[idx]);
+      LOG(INFO) << "————————————————————VAEEncoder3————————————————————————";
       (*feat_cache)[idx] = cache_x;
       (*feat_idx)[0] += 1;
     } else {
+      LOG(INFO) << "————————————————————VAEEncoder4————————————————————————";
       x = conv_in_->forward(x);
     }
+    LOG(INFO) << "————————————————————VAEEncoder5————————————————————————";
 
     // Type-safe forward call for down_blocks_
     for (size_t i = 0; i < down_blocks_->size(); ++i) {
@@ -1505,6 +1529,7 @@ class WANVAEImpl : public torch::nn::Module {
     int64_t iter_ = 1 + (num_frame - 1) / 4;
     clear_cache();
     torch::Tensor out;
+    LOG(INFO) << "————————————————————进入VAE encode_————————————————————————";
 
     feat_map_ = std::make_shared<std::vector<torch::Tensor>>(
         std::vector<torch::Tensor>(conv_num_));
@@ -1517,6 +1542,8 @@ class WANVAEImpl : public torch::nn::Module {
                                      torch::indexing::Slice(0, 1),
                                      torch::indexing::Slice(),
                                      torch::indexing::Slice()});
+        LOG(INFO)
+            << "————————————————————进入VAE encoder————————————————————————";
         out = encoder_(x_slice, enc_feat_map_, enc_conv_idx_);
       } else {
         int64_t start = 1 + 4 * (i - 1);
@@ -1537,6 +1564,7 @@ class WANVAEImpl : public torch::nn::Module {
 
   AutoencoderKLOutput encode(const torch::Tensor& videos) {
     torch::Tensor hidden_states;
+    LOG(INFO) << "————————————————————进入VAE encode————————————————————————";
     if (use_slicing_) {
       std::vector<torch::Tensor> latent_slices;
       for (const auto& x_slice : videos.split(1)) {
@@ -1757,6 +1785,42 @@ REGISTER_MODEL_ARGS(AutoencoderKLWan, [&] {
   LOAD_ARG_OR(vae_is_residual, "is_residual", false);
   LOAD_ARG_OR(vae_scale_factor_temporal, "scale_factor_temporal", 4);
   LOAD_ARG_OR(vae_scale_factor_spatial, "scale_factor_spatial", 8);
+  LOAD_ARG_OR(vae_latents_mean,
+              "latents_mean",
+              (std::vector<double>{-0.7571,
+                                   -0.7089,
+                                   -0.9113,
+                                   0.1075,
+                                   -0.1745,
+                                   0.9653,
+                                   -0.1517,
+                                   1.5508,
+                                   0.4134,
+                                   -0.0715,
+                                   0.5517,
+                                   -0.3632,
+                                   -0.1922,
+                                   -0.9497,
+                                   0.2503,
+                                   -0.2921}));
+  LOAD_ARG_OR(vae_latents_std,
+              "latents_std",
+              (std::vector<double>{2.8184,
+                                   1.4541,
+                                   2.3275,
+                                   2.6558,
+                                   1.2196,
+                                   1.7708,
+                                   2.6052,
+                                   2.0743,
+                                   3.2687,
+                                   2.1526,
+                                   2.8652,
+                                   1.5579,
+                                   1.6382,
+                                   1.1253,
+                                   2.8251,
+                                   1.916}));
 });
 
 }  // namespace xllm
