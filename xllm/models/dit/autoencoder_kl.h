@@ -62,10 +62,13 @@ class VAEImageProcessorImpl : public torch::nn::Module {
                                  bool do_binarize = false,
                                  bool do_convert_rgb = false,
                                  bool do_convert_grayscale = false,
-                                 int64_t latent_channels = 4) {
+                                 int64_t latent_channels = 4,
+                                 int64_t scale_factor = -1) {
     const auto& model_args = context.get_model_args();
     options_ = context.get_tensor_options();
-    scale_factor_ = 1 << model_args.block_out_channels().size();
+    scale_factor_ = scale_factor == -1
+                        ? (1 << model_args.block_out_channels().size())
+                        : scale_factor;
     latent_channels_ = latent_channels;
     do_resize_ = do_resize;
     do_normalize_ = do_normalize;
@@ -114,6 +117,8 @@ class VAEImageProcessorImpl : public torch::nn::Module {
       }
     }
     int channel = processed.size(1);
+    LOG(INFO) << "latent_channels_ 的值为：" << latent_channels_;
+    LOG(INFO) << "processed 张量形状: " << processed.sizes();
     if (channel == latent_channels_) {
       return image;
     }
@@ -183,11 +188,19 @@ class VAEImageProcessorImpl : public torch::nn::Module {
   torch::Tensor resize(const torch::Tensor& image,
                        int64_t target_height,
                        int64_t target_width) const {
-    return torch::nn::functional::interpolate(
-        image,
+    // Save original dim
+    const auto orig_dim = image.dim();
+
+    // Check if 4D tensor (batch, channel, height, width)
+    auto img = orig_dim == 3 ? image.unsqueeze(0) : image;
+
+    auto resized = torch::nn::functional::interpolate(
+        img,
         torch::nn::functional::InterpolateFuncOptions()
             .size(std::vector<int64_t>{target_height, target_width})
             .mode(torch::kNearest));
+
+    return orig_dim == 3 ? resized.squeeze(0) : resized;
   }
 
  private:

@@ -25,6 +25,7 @@ limitations under the License.
 #include "common/global_flags.h"
 #include "common/metrics.h"
 #include "common/types.h"
+#include "core/distributed_runtime/comm_channel.h"
 #include "core/runtime/params_utils.h"
 #include "framework/request/sequence.h"
 #include "framework/sampling/sampling_params.h"
@@ -72,6 +73,7 @@ void WorkerService::step(ForwardInput& fwd_input,
                          torch::Tensor& top_logprobs,
                          torch::Tensor& embeddings,
                          std::vector<torch::Tensor>& mm_embeddings,
+                         std::vector<torch::Tensor>& dit_images,
                          torch::Tensor& expert_load_data,
                          int32_t& prepared_layer_id,
                          torch::Tensor& src_seq_idxes,
@@ -79,7 +81,6 @@ void WorkerService::step(ForwardInput& fwd_input,
                          torch::Tensor& out_logprobs) {
   // execute model
   auto future = worker_->step_async(fwd_input);
-
   if (!options_.enable_schedule_overlap()) {
     auto forward_outputs = std::move(future).get();
     // convert ForwardOutput to proto::ForwardOutput which contain Tokens.
@@ -88,6 +89,8 @@ void WorkerService::step(ForwardInput& fwd_input,
       const auto& sample_output = forward_outputs.value().sample_output;
       const auto& beam_search_output =
           forward_outputs.value().beam_search_output;
+      const auto& dit_forward_output =
+          forward_outputs.value().dit_forward_output;
       expert_load_data =
           safe_to(forward_outputs.value().expert_load_data, torch::kCPU, true);
       prepared_layer_id = forward_outputs.value().prepared_layer_id;
@@ -104,6 +107,12 @@ void WorkerService::step(ForwardInput& fwd_input,
         mm_embeddings.reserve(sample_output.mm_embeddings.size());
         for (auto mm_embedding : sample_output.mm_embeddings) {
           mm_embeddings.emplace_back(safe_to(mm_embedding, torch::kCPU, true));
+        }
+
+        dit_images.clear();
+        dit_images.reserve(dit_forward_output.tensors.size());
+        for (auto dit_image : dit_forward_output.tensors) {
+          dit_images.emplace_back(safe_to(dit_image, torch::kCPU, true));
         }
 
         // [num_seq]
@@ -174,6 +183,7 @@ void WorkerService::create_polling_shm_thread(
           torch::Tensor top_logprobs;
           torch::Tensor embeddings;
           std::vector<torch::Tensor> mm_embeddings;
+          std::vector<torch::Tensor> dit_images;
           torch::Tensor expert_load_data;
           int32_t prepared_layer_id = -1;
 
@@ -189,6 +199,7 @@ void WorkerService::create_polling_shm_thread(
                top_logprobs,
                embeddings,
                mm_embeddings,
+               dit_images,
                expert_load_data,
                prepared_layer_id,
                src_seq_idxes,
@@ -201,6 +212,7 @@ void WorkerService::create_polling_shm_thread(
                                                top_logprobs,
                                                embeddings,
                                                mm_embeddings,
+                                               dit_images,
                                                expert_load_data,
                                                prepared_layer_id,
                                                src_seq_idxes,
@@ -286,8 +298,18 @@ void WorkerService::AllocateKVCache(
   threadpool_->schedule([this, controller, request, response, done]() mutable {
     brpc::ClosureGuard done_guard(done);
     std::vector<std::vector<int64_t>> kv_cache_shape;
-    // Reserve for key, value, and optionally index shape
-    kv_cache_shape.reserve(3);
+    const bool has_index_shape =
+        request->kv_cache_shape().index_shape_size() > 0;
+    const bool has_conv_shape = request->kv_cache_shape().conv_shape_size() > 0;
+    const bool has_ssm_shape = request->kv_cache_shape().ssm_shape_size() > 0;
+    const bool enable_gdn_attention = has_conv_shape || has_ssm_shape;
+    CHECK(!(has_index_shape && enable_gdn_attention))
+        << "KVCacheShape does not support index_shape with conv/ssm shapes "
+        << "simultaneously.";
+    // Reserve for key, value, and optional extra shapes
+    kv_cache_shape.reserve(enable_gdn_attention
+                               ? kKVCacheShapeSizeWithConvAndSsm
+                               : kKVCacheShapeSizeWithIndex);
     kv_cache_shape.emplace_back(
         std::vector<int64_t>(request->kv_cache_shape().key_shape().begin(),
                              request->kv_cache_shape().key_shape().end()));
@@ -295,10 +317,19 @@ void WorkerService::AllocateKVCache(
         std::vector<int64_t>(request->kv_cache_shape().value_shape().begin(),
                              request->kv_cache_shape().value_shape().end()));
     // add index shape if exists
-    if (request->kv_cache_shape().index_shape_size() > 0) {
+    if (has_index_shape) {
       kv_cache_shape.emplace_back(
           std::vector<int64_t>(request->kv_cache_shape().index_shape().begin(),
                                request->kv_cache_shape().index_shape().end()));
+    } else if (enable_gdn_attention) {
+      CHECK(has_conv_shape && has_ssm_shape)
+          << "conv_shape and ssm_shape must be provided together.";
+      kv_cache_shape.emplace_back(
+          std::vector<int64_t>(request->kv_cache_shape().conv_shape().begin(),
+                               request->kv_cache_shape().conv_shape().end()));
+      kv_cache_shape.emplace_back(
+          std::vector<int64_t>(request->kv_cache_shape().ssm_shape().begin(),
+                               request->kv_cache_shape().ssm_shape().end()));
     }
 
     auto future = worker_->allocate_kv_cache_async(kv_cache_shape);
@@ -316,18 +347,32 @@ void WorkerService::AllocateKVCacheWithTransfer(
   threadpool_->schedule([this, controller, req, resp, done]() mutable {
     brpc::ClosureGuard done_guard(done);
     std::vector<std::vector<int64_t>> kv_cache_shape;
-    kv_cache_shape.reserve(2);
-    kv_cache_shape.emplace_back(
-        std::vector<int64_t>(req->kv_cache_shape().key_shape().begin(),
-                             req->kv_cache_shape().key_shape().end()));
-    kv_cache_shape.emplace_back(
-        std::vector<int64_t>(req->kv_cache_shape().value_shape().begin(),
-                             req->kv_cache_shape().value_shape().end()));
+    const auto& shape_req = req->kv_cache_shape();
+    const bool has_index_shape = shape_req.index_shape_size() > 0;
+    const bool has_conv_shape = shape_req.conv_shape_size() > 0;
+    const bool has_ssm_shape = shape_req.ssm_shape_size() > 0;
+    const bool enable_gdn_attention = has_conv_shape || has_ssm_shape;
+    CHECK(!(has_index_shape && enable_gdn_attention))
+        << "KVCacheShape does not support index_shape with conv/ssm shapes "
+        << "simultaneously.";
+    kv_cache_shape.reserve(enable_gdn_attention
+                               ? kKVCacheShapeSizeWithConvAndSsm
+                               : kKVCacheShapeSizeWithIndex);
+    kv_cache_shape.emplace_back(std::vector<int64_t>(
+        shape_req.key_shape().begin(), shape_req.key_shape().end()));
+    kv_cache_shape.emplace_back(std::vector<int64_t>(
+        shape_req.value_shape().begin(), shape_req.value_shape().end()));
     // add index shape if exists
-    if (req->kv_cache_shape().index_shape_size() > 0) {
-      kv_cache_shape.emplace_back(
-          std::vector<int64_t>(req->kv_cache_shape().index_shape().begin(),
-                               req->kv_cache_shape().index_shape().end()));
+    if (has_index_shape) {
+      kv_cache_shape.emplace_back(std::vector<int64_t>(
+          shape_req.index_shape().begin(), shape_req.index_shape().end()));
+    } else if (enable_gdn_attention) {
+      CHECK(has_conv_shape && has_ssm_shape)
+          << "conv_shape and ssm_shape must be provided together.";
+      kv_cache_shape.emplace_back(std::vector<int64_t>(
+          shape_req.conv_shape().begin(), shape_req.conv_shape().end()));
+      kv_cache_shape.emplace_back(std::vector<int64_t>(
+          shape_req.ssm_shape().begin(), shape_req.ssm_shape().end()));
     }
 
     auto future =
@@ -569,7 +614,7 @@ void WorkerService::Wakeup(::google::protobuf::RpcController* controller,
       std::vector<WeightSegment> segments;
       segments.reserve(seg_list.segments_size());
       for (const auto& proto_seg : seg_list.segments()) {
-        segments.push_back({proto_seg.offset(), proto_seg.size()});
+        segments.emplace_back(proto_seg.offset(), proto_seg.size());
       }
       options.src_weight_segments.push_back(std::move(segments));
     }
@@ -601,6 +646,7 @@ void WorkerService::ExecuteModel(::google::protobuf::RpcController* controller,
         torch::Tensor top_logprobs;
         torch::Tensor embeddings;
         std::vector<torch::Tensor> mm_embeddings;
+        std::vector<torch::Tensor> dit_images;
         torch::Tensor expert_load_data;
         int32_t prepared_layer_id = -1;
         // beam search kernel output
@@ -615,6 +661,7 @@ void WorkerService::ExecuteModel(::google::protobuf::RpcController* controller,
              top_logprobs,
              embeddings,
              mm_embeddings,
+             dit_images,
              expert_load_data,
              prepared_layer_id,
              src_seq_idxes,
@@ -631,6 +678,7 @@ void WorkerService::ExecuteModel(::google::protobuf::RpcController* controller,
                                 src_seq_idxes,
                                 out_tokens,
                                 out_logprobs,
+                                dit_images,
                                 pb_forward_output);
         COUNTER_ADD(worker_service_latency_seconds, timer.elapsed_seconds());
       });
@@ -659,6 +707,14 @@ void WorkerService::GetLastStepResult(
           auto embeddings =
               safe_to(sample_output.embeddings, torch::kCPU, true);
           embeddings = safe_to(embeddings, torch::kFloat32, true);
+
+          std::vector<torch::Tensor> dit_images;
+          dit_images.reserve(
+              forward_outputs.value().dit_forward_output.tensors.size());
+          for (auto image :
+               forward_outputs.value().dit_forward_output.tensors) {
+            dit_images.emplace_back(image);
+          }
 
           // [num_seq]
           const auto& next_tokens =
@@ -696,6 +752,7 @@ void WorkerService::GetLastStepResult(
                                     src_seq_idxes,
                                     out_tokens,
                                     out_logprobs,
+                                    dit_images,
                                     pb_forward_output);
           }
         }

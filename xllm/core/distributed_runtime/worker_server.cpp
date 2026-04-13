@@ -21,12 +21,16 @@ limitations under the License.
 #include <folly/futures/Future.h>
 #include <gflags/gflags.h>
 #include <glog/logging.h>
+#include <signal.h>
+#include <spawn.h>
+#include <sys/wait.h>
 #include <torch/torch.h>
 #include <unistd.h>
 
+#include <cerrno>
+#include <chrono>
 #include <cstdlib>
 #include <memory>
-#include <optional>
 #include <utility>
 
 #include "common/global_flags.h"
@@ -37,6 +41,7 @@ limitations under the License.
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_input_params.h"
 #include "framework/parallel_state/collective_communicator.h"
+#include "framework/parallel_state/dit_collective_communicator.h"
 #include "framework/parallel_state/mapping_npu.h"
 #include "framework/state_dict/state_dict.h"
 #include "runtime/forward_params.h"
@@ -69,10 +74,14 @@ void WorkerServer::create_server(
     int32_t dp_size,
     int local_rank,
     int32_t ep_size,
+    int32_t cp_size,
     WorkerType worker_type,
     std::unique_ptr<ForwardSharedMemoryManager> input_shm_manager,
     std::unique_ptr<ForwardSharedMemoryManager> output_shm_manager) {
   FLAGS_enable_prefill_sp = options.enable_prefill_sp();
+#if defined(USE_NPU)
+  FLAGS_npu_kernel_backend = options.npu_kernel_backend();
+#endif
   Device device(d);
   device.set_device();
   LOG(INFO) << "Create worker server with device: " << device.index();
@@ -123,16 +132,38 @@ void WorkerServer::create_server(
   addr_info.set_address(worker_server_addr);
   addr_info.set_global_rank(worker_global_rank);
   proto::CommUniqueIdList uids;
-  sync_master_node(master_node_addr, addr_info, uids);
+  if (!sync_master_node(master_node_addr, addr_info, uids)) {
+    LOG(WARNING) << "Worker#" << worker_global_rank
+                 << " failed to sync with master node, stop worker startup.";
+    return;
+  }
 
-  CollectiveCommunicator comm(worker_global_rank, world_size, dp_size, ep_size);
-  const ParallelArgs* parallel_args = comm.parallel_args();
-  comm.create_process_groups(master_node_addr, device);
+  const ParallelArgs* parallel_args = nullptr;
+  std::unique_ptr<CollectiveCommunicatorBase> comm;
+  if (worker_type == WorkerType::DIT) {
+    auto dit_comm =
+        std::make_unique<DiTCollectiveCommunicator>(worker_global_rank,
+                                                    world_size,
+                                                    options.dp_size(),
+                                                    options.tp_size(),
+                                                    options.sp_size(),
+                                                    options.cfg_size());
+    comm = std::move(dit_comm);
+  } else {
+    auto common_comm = std::make_unique<CollectiveCommunicator>(
+        worker_global_rank, world_size, dp_size, ep_size, cp_size);
+    comm = std::move(common_comm);
+  }
+
+  comm->create_process_groups(master_node_addr, device);
+  parallel_args = comm->parallel_args();
 
   std::unique_ptr<Worker> worker =
       std::make_unique<Worker>(*parallel_args, device, options, worker_type);
   worker_service->set_worker(std::move(worker));
-  if (options.enable_shm() && input_shm_manager && output_shm_manager) {
+  bool create_shm =
+      options.enable_shm() && input_shm_manager && output_shm_manager;
+  if (create_shm) {
     worker_service->create_polling_shm_thread(std::move(input_shm_manager),
                                               std::move(output_shm_manager));
   }
@@ -144,12 +175,24 @@ void WorkerServer::create_server(
 }
 
 void WorkerServer::stop() {
-  auto worker_server = ServerRegistry::get_instance().get_server(server_name_);
-  if (worker_server) {
-    worker_server->stop();
-
-    ServerRegistry::get_instance().unregister_server(server_name_);
+  bool expected = false;
+  if (!stopped_.compare_exchange_strong(expected, true)) {
+    return;
   }
+
+  auto& registry = ServerRegistry::get_instance();
+  auto worker_server = registry.try_get_server(server_name_);
+  if (worker_server != nullptr) {
+    worker_server->stop();
+    registry.unregister_server(server_name_);
+  }
+
+  if (worker_thread_ && worker_thread_->joinable()) {
+    worker_thread_->join();
+  }
+
+  stop_spawn_worker();
+  use_spwan_worker_ = false;
 }
 
 void WorkerServer::create_spawn_server(int local_rank,
@@ -204,19 +247,15 @@ void WorkerServer::create_spawn_server(int local_rank,
                         communication_backend_ptr,
                         nullptr};
   pid_t pid;
-  posix_spawn_file_actions_init(&file_actions_);
-  posix_spawnattr_init(&spawn_attr_);
-  int status = posix_spawnp(&pid,
-                            argv[0],
-                            &file_actions_,
-                            &spawn_attr_,
-                            const_cast<char**>(argv),
-                            environ);
+  int status = posix_spawnp(
+      &pid, argv[0], nullptr, nullptr, const_cast<char**>(argv), environ);
   if (status != 0) {
     LOG(ERROR) << "posix_spawnp failed: " << strerror(status);
     return;
   }
   use_spwan_worker_ = true;
+  spawned_worker_pid_ = pid;
+  LOG(INFO) << "Spawn worker success, pid: " << spawned_worker_pid_;
   done.store(true);
 }
 
@@ -259,7 +298,8 @@ WorkerServer::WorkerServer(int local_worker_idx,
 
   if (worker_type == WorkerType::LLM || worker_type == WorkerType::ELM ||
       worker_type == WorkerType::VLM || worker_type == WorkerType::EVLM ||
-      worker_type == WorkerType::REC || worker_type == WorkerType::MMEVLM) {
+      worker_type == WorkerType::REC || worker_type == WorkerType::MMEVLM ||
+      worker_type == WorkerType::DIT) {
     if (use_spawn_worker) {
       // start worker in a spawn process(for offline inference worker.)
       create_spawn_server(local_worker_idx,
@@ -293,6 +333,7 @@ WorkerServer::WorkerServer(int local_worker_idx,
                                         parallel_args.dp_size(),
                                         local_worker_idx,
                                         parallel_args.ep_size(),
+                                        parallel_args.cp_size(),
                                         worker_type,
                                         std::move(input_shm_manager),
                                         std::move(output_shm_manager));
@@ -348,22 +389,29 @@ bool WorkerServer::sync_master_node(const std::string& master_node_addr,
   return true;
 }
 
-WorkerServer::~WorkerServer() {
-  auto worker_server = ServerRegistry::get_instance().get_server(server_name_);
-  if (worker_server != nullptr) {
-    worker_server->stop();
+WorkerServer::~WorkerServer() { stop(); }
+
+void WorkerServer::stop_spawn_worker() {
+  if (!use_spwan_worker_ || spawned_worker_pid_ <= 0) {
+    return;
   }
 
-  if (worker_thread_ && worker_thread_->joinable()) {
-    worker_thread_->join();
+  if (kill(spawned_worker_pid_, SIGTERM) != 0 && errno != ESRCH) {
+    LOG(WARNING) << "Failed to send SIGTERM to spawn worker pid "
+                 << spawned_worker_pid_ << ", errno: " << errno;
   }
 
-  if (use_spwan_worker_) {
-    posix_spawn_file_actions_destroy(&file_actions_);
-    posix_spawnattr_destroy(&spawn_attr_);
+  int status = 0;
+  pid_t ret = waitpid(spawned_worker_pid_, &status, 0);
+  if (ret == spawned_worker_pid_) {
+    LOG(INFO) << "Spawn worker(pid=" << spawned_worker_pid_
+              << ") exited with status: " << status;
+  } else if (ret < 0 && errno != ECHILD) {
+    LOG(WARNING) << "waitpid failed for spawn worker pid "
+                 << spawned_worker_pid_ << ", errno: " << errno;
   }
 
-  ServerRegistry::get_instance().unregister_server(server_name_);
+  spawned_worker_pid_ = -1;
 }
 
 }  // namespace xllm

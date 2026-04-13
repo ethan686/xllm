@@ -16,18 +16,6 @@ if(DEVICE_ARCH STREQUAL "ARM")
 endif()
 
 if(USE_NPU)
-  if(DEVICE_TYPE STREQUAL "USE_A3")
-      add_compile_definitions(USE_A3) 
-      add_definitions(-DUSE_A3)
-      set(USE_A3 ON)
-      message(STATUS "Building for device: A3 (macro USE_A3 defined)")
-  else()
-      add_compile_definitions(USE_A2)
-      add_definitions(-DUSE_A2)
-      set(USE_A2 ON)
-      message(STATUS "Building for device: A2 (macro USE_A2 defined)")
-  endif()
-
   # Override Mooncake option for mooncake transfer engine
   # CANN 8.5+ migration: ascend_direct_transport replaces ascend_transport
   set(USE_ASCEND_DIRECT ON CACHE BOOL "Enable ADXL engine for Ascend NPU" FORCE)
@@ -273,6 +261,17 @@ find_package(leveldb CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED)
 find_package(absl CONFIG REQUIRED)
 find_package(Protobuf CONFIG REQUIRED)
+# Ensure vcpkg protobuf headers are found before PyTorch's bundled older version.
+# Use BEFORE SYSTEM so that:
+#   1) vcpkg protobuf is first in -isystem list (before torch's -isystem)
+#   2) project-local -I paths (e.g. Mooncake fake_include stubs) still win over -isystem
+# Protobuf_INCLUDE_DIRS may be empty in CONFIG mode; fall back to the imported target.
+if(NOT Protobuf_INCLUDE_DIRS AND TARGET protobuf::libprotobuf)
+  get_target_property(Protobuf_INCLUDE_DIRS protobuf::libprotobuf INTERFACE_INCLUDE_DIRECTORIES)
+endif()
+if(Protobuf_INCLUDE_DIRS)
+  include_directories(BEFORE SYSTEM ${Protobuf_INCLUDE_DIRS})
+endif()
 find_package(gRPC CONFIG REQUIRED)
 find_package(folly CONFIG REQUIRED)
 find_package(GTest CONFIG REQUIRED)
@@ -321,9 +320,6 @@ else()
 endif()
 
 if(USE_NPU)
-  # USE_NPU_TORCH: Temporary flag used for debugging qwen3 torch NPU graph
-  # capture. This variable may be removed in the future.
-  # add_definitions(-DUSE_NPU_TORCH)
   add_definitions(-DUSE_NPU)
   add_definitions(-DBUILD_LIBTORCH)
   add_definitions(-DTORCH_SETCUSTOMHANDLER=ON)
@@ -346,6 +342,7 @@ if(USE_NPU)
       $ENV{NPU_HOME_PATH}/include
       $ENV{ATB_HOME_PATH}/include
       $ENV{NPU_HOME_PATH}/opp/vendors/xllm/op_api/include/
+      ${CMAKE_CURRENT_SOURCE_DIR}/third_party/torch_npu_ops/
   )
   # Keep third-party warnings suppressed while providing headers expected by
   # legacy includes like "atb_speed/log.h" from xllm_atb_layers.
@@ -467,8 +464,8 @@ if(USE_CUDA)
   add_definitions(-DUSE_CUDA)
   add_compile_definitions(TORCH_CUDA=1)
   set(CMAKE_VERBOSE_MAKEFILE ON)
-  include_directories(
-      $ENV{PYTHON_INCLUDE_PATH}
+  include_directories($ENV{PYTHON_INCLUDE_PATH})
+  include_directories(SYSTEM
       $ENV{PYTORCH_INSTALL_PATH}/include
       $ENV{PYTORCH_INSTALL_PATH}/include/torch/csrc/api/include
   )

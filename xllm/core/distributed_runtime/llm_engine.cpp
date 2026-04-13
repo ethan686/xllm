@@ -98,8 +98,10 @@ LLMEngine::LLMEngine(const runtime::Options& options,
   setup_workers(options);
 
   dp_size_ = options_.dp_size();
+  cp_size_ = options_.cp_size();
   worker_clients_num_ = worker_clients_.size();
-  dp_local_tp_size_ = worker_clients_num_ / dp_size_;
+  dp_local_size_ = worker_clients_num_ / dp_size_;
+  dp_local_tp_size_ = dp_local_size_ / cp_size_;
 
   // create ThreadPool for link cluster
   link_threadpool_ = std::make_unique<ThreadPool>(worker_clients_num_);
@@ -187,15 +189,22 @@ bool LLMEngine::init_model(MasterStatus master_status) {
   tokenizer_args_ = model_loader->tokenizer_args();
 
   // compute the number of local kv heads and head dim
-  const uint32_t world_size =
-      dp_size_ > 1 ? dp_local_tp_size_ : worker_clients_num_;
+  const uint32_t world_size = dp_local_tp_size_;
   const int64_t n_heads = args_.n_heads();
   const int64_t n_kv_heads = args_.n_kv_heads().value_or(n_heads);
   n_local_kv_heads_ = std::max<int64_t>(1, n_kv_heads / world_size);
   n_local_q_heads_ = std::max<int64_t>(1, n_heads / world_size);
   head_dim_ = args_.head_dim();
   dtype_ = util::parse_dtype(args_.dtype(), options_.devices()[0]);
-
+  // For qwen3_next hybrid attention.
+  if (has_linear_attention_layers(args_)) {
+    const int64_t linear_n_k_heads = args_.linear_num_key_heads();
+    const int64_t linear_n_v_heads = args_.linear_num_value_heads();
+    n_local_linear_k_heads_ =
+        std::max<int64_t>(1, linear_n_k_heads / world_size);
+    n_local_linear_v_heads_ =
+        std::max<int64_t>(1, linear_n_v_heads / world_size);
+  }
   // key + value for all layers
   LOG(INFO) << "Block info, block_size: " << options_.block_size()
             << ", n_local_kv_heads: " << n_local_kv_heads_
@@ -442,7 +451,7 @@ Engine::KVCacheCapacity LLMEngine::estimate_kv_cache_capacity() {
   int64_t scale_slot_size =
       0;  // Extra overhead for scale tensors in quant mode
 
-  if (FLAGS_enable_mla) {
+  if (options_.enable_mla()) {
 #if defined(USE_NPU)
     if (args_.model_type() == "deepseek_v3" && FLAGS_enable_prefix_cache) {
       slot_size =
@@ -474,7 +483,7 @@ Engine::KVCacheCapacity LLMEngine::estimate_kv_cache_capacity() {
   // => per token: n_kv_heads floats for K + n_kv_heads for V.
   // MLA: key scale [num_blocks, 1, block_size] => one float per token.
   if (enable_kv_cache_quant) {
-    if (FLAGS_enable_mla) {
+    if (options_.enable_mla()) {
       // MLA scale shape is [num_blocks, 1, block_size] -> one float per token
       scale_slot_size = sizeof(float);
     } else {
@@ -483,8 +492,22 @@ Engine::KVCacheCapacity LLMEngine::estimate_kv_cache_capacity() {
       scale_slot_size = 2 * sizeof(float) * n_local_kv_heads_;
     }
   }
+  // For qwen3_next linear-attention layers.
+  int64_t linear_slot_size = 0;
+  if (args_.linear_num_value_heads() > 0) {
+    int64_t head_k_dim = args_.linear_key_head_dim();
+    int64_t head_v_dim = args_.linear_value_head_dim();
+    int64_t linear_ssm_slot_size =
+        dtype_size * n_local_linear_v_heads_ * head_k_dim * head_v_dim;
+    int64_t linear_conv_slot_size = dtype_size *
+                                    (head_k_dim * n_local_linear_k_heads_ * 2 +
+                                     head_v_dim * n_local_linear_v_heads_) *
+                                    (args_.linear_conv_kernel_dim() - 1);
+    linear_slot_size = linear_ssm_slot_size + linear_conv_slot_size;
+  }
   kv_cache_cap.slot_size = slot_size;
   kv_cache_cap.index_slot_size = index_slot_size;
+  kv_cache_cap.linear_slot_size = linear_slot_size;
   kv_cache_cap.n_layers = args_.n_layers();
 #if !defined(USE_NPU)
   // this adoption is because the allocation of kv cache is based on
@@ -496,12 +519,26 @@ Engine::KVCacheCapacity LLMEngine::estimate_kv_cache_capacity() {
   }
 #endif
 
+  int64_t full_attention_interval = (args_.full_attention_interval() < 1)
+                                        ? 1
+                                        : args_.full_attention_interval();
+  int64_t num_full_attention_layers =
+      kv_cache_cap.n_layers / full_attention_interval;
+  int64_t num_linear_attention_layers =
+      kv_cache_cap.n_layers - num_full_attention_layers;
   // compute kv cache n_blocks
   const int32_t block_size = options_.block_size();
   const int64_t block_size_in_bytes =
       block_size * (slot_size + index_slot_size + scale_slot_size);
-  kv_cache_cap.n_blocks = kv_cache_cap.cache_size_in_bytes /
-                          (kv_cache_cap.n_layers * block_size_in_bytes);
+  const int64_t full_cache_block_size_in_bytes =
+      block_size * (slot_size + index_slot_size + scale_slot_size);
+  const int64_t total_cache_block_size_in_bytes =
+      num_full_attention_layers * full_cache_block_size_in_bytes +
+      num_linear_attention_layers * linear_slot_size;
+  CHECK_GT(total_cache_block_size_in_bytes, 0)
+      << "invalid cache block size estimate";
+  kv_cache_cap.n_blocks =
+      kv_cache_cap.cache_size_in_bytes / total_cache_block_size_in_bytes;
   CHECK_GT(kv_cache_cap.n_blocks, 0) << "no n_blocks for kv cache";
   return kv_cache_cap;
 }
@@ -517,11 +554,12 @@ bool LLMEngine::allocate_kv_cache(const Engine::KVCacheCapacity& kv_cache_cap) {
   CHECK_GT(kv_cache_cap.n_blocks, 0) << "no memory for kv cache";
   const int32_t block_size = options_.block_size();
   bool enable_lighting_indexer = args_.index_n_heads() > 1;
+  bool enable_gdn_attention = has_linear_attention_layers(args_);
 
   // init kv cache for each worker
   std::vector<std::vector<int64_t>> kv_cache_shape;
   kv_cache_shape.reserve(2);
-  if (FLAGS_enable_mla) {
+  if (options_.enable_mla()) {
 #if defined(USE_NPU)
     if (args_.model_type() == "deepseek_v3" && FLAGS_enable_prefix_cache) {
       kv_cache_shape.emplace_back(
@@ -556,6 +594,18 @@ bool LLMEngine::allocate_kv_cache(const Engine::KVCacheCapacity& kv_cache_cap) {
     kv_cache_shape.emplace_back(std::vector<int64_t>{
         kv_cache_cap.n_blocks, block_size, 1, args_.index_head_dim()});
   }
+  if (enable_gdn_attention) {
+    kv_cache_shape.emplace_back(std::vector<int64_t>{
+        kv_cache_cap.n_blocks,
+        args_.linear_key_head_dim() * n_local_linear_k_heads_ * 2 +
+            args_.linear_key_head_dim() * n_local_linear_v_heads_,
+        args_.linear_conv_kernel_dim() - 1});
+    kv_cache_shape.emplace_back(
+        std::vector<int64_t>{kv_cache_cap.n_blocks,
+                             n_local_linear_v_heads_,
+                             args_.linear_key_head_dim(),
+                             args_.linear_value_head_dim()});
+  }
 #if defined(USE_MLU)
   // transpose kv_cache layout for mlu
   // default layout: [n_blocks, block_size, n_head, head_dim]
@@ -563,7 +613,7 @@ bool LLMEngine::allocate_kv_cache(const Engine::KVCacheCapacity& kv_cache_cap) {
   for (auto& shape : kv_cache_shape) {
     std::swap(shape[1], shape[2]);
   }
-  if (FLAGS_enable_mla) {
+  if (options_.enable_mla()) {
     kv_cache_shape[0][3] = args_.kv_lora_rank() + args_.qk_rope_head_dim();
     kv_cache_shape[1] = std::vector<int64_t>{};
   }
@@ -578,6 +628,13 @@ bool LLMEngine::allocate_kv_cache(const Engine::KVCacheCapacity& kv_cache_cap) {
   LOG(INFO) << "Initializing v cache with shape: [" << kv_cache_shape[1] << "]";
   if (enable_lighting_indexer) {
     LOG(INFO) << "Initializing indexer cache with shape: [" << kv_cache_shape[2]
+              << "]";
+  }
+  if (enable_gdn_attention) {
+    LOG(INFO) << "GND Attention is enabled";
+    LOG(INFO) << "Initializing conv cache with shape: [" << kv_cache_shape[2]
+              << "]";
+    LOG(INFO) << "Initializing ssm cache with shape: [" << kv_cache_shape[3]
               << "]";
   }
 
@@ -986,11 +1043,36 @@ ForwardOutput LLMEngine::step(std::vector<Batch>& batch) {
   std::vector<folly::SemiFuture<std::optional<RawForwardOutput>>> futures;
   futures.reserve(worker_clients_num_);
 
+  std::vector<std::vector<RawForwardInput>> cp_partitioned_inputs(dp_size_);
+
+  if (cp_size_ > 1) {
+    for (int32_t dp_rank = 0; dp_rank < dp_size_; ++dp_rank) {
+      if (!raw_forward_inputs[dp_rank].batch_forward_type.is_prefill()) {
+        continue;
+      }
+      auto& inputs_per_cp = cp_partitioned_inputs[dp_rank];
+      inputs_per_cp.reserve(cp_size_);
+      for (uint32_t cp_rank = 0; cp_rank < cp_size_; ++cp_rank) {
+        inputs_per_cp.emplace_back(
+            raw_forward_inputs[dp_rank].cp_partition(cp_rank, cp_size_));
+      }
+    }
+  }
+
   // update dp related global paramters and then execute model
   for (auto worker_rank = 0; worker_rank < worker_clients_num_; ++worker_rank) {
-    auto dp_rank = worker_rank / dp_local_tp_size_;
+    const int32_t dp_rank = worker_rank / dp_local_size_;
+    const RawForwardInput* input_to_send = &raw_forward_inputs[dp_rank];
+    if (cp_size_ > 1 &&
+        raw_forward_inputs[dp_rank].batch_forward_type.is_prefill()) {
+      const int32_t local_rank_in_dp_group = worker_rank % dp_local_size_;
+      const int32_t cp_rank = local_rank_in_dp_group / dp_local_tp_size_;
+      CHECK_GE(cp_rank, 0);
+      CHECK_LT(cp_rank, static_cast<int32_t>(cp_size_));
+      input_to_send = &cp_partitioned_inputs[dp_rank][cp_rank];
+    }
     futures.emplace_back(
-        worker_clients_[worker_rank]->step_async(raw_forward_inputs[dp_rank]));
+        worker_clients_[worker_rank]->step_async(*input_to_send));
   }
 
   // wait for the all future to complete
@@ -1000,10 +1082,10 @@ ForwardOutput LLMEngine::step(std::vector<Batch>& batch) {
     process_eplb_data(results);
   }
 
-  assert(dp_size_ == worker_clients_num_ / dp_local_tp_size_);
+  assert(dp_size_ == worker_clients_num_ / dp_local_size_);
   size_t dp_rank = 0;
   for (auto worker_rank = 0; worker_rank < worker_clients_num_;
-       worker_rank += dp_local_tp_size_) {
+       worker_rank += dp_local_size_) {
     auto result = results[worker_rank].value();
     if (result.has_value()) {
       if (result.value().outputs.empty() && layer_forward_interrupted_) {
@@ -1020,6 +1102,8 @@ ForwardOutput LLMEngine::step(std::vector<Batch>& batch) {
       } else {
         batch[dp_rank].process_beam_search_output(result.value(), false);
       }
+      // Keep Batch::sequences_ aligned with SequencesGroup after beam updates.
+      batch[dp_rank].refresh_sequences_from_groups();
     } else {
       LOG(FATAL) << "Failed to execute model, result has no value";
     }
@@ -1074,6 +1158,8 @@ void LLMEngine::update_last_step_result(std::vector<Batch>& last_batch) {
   for (auto i = 0; i < last_batch.size(); i++) {
     last_batch[i].process_sample_output(raw_forward_outputs[i],
                                         options_.enable_schedule_overlap());
+    // Keep Batch::sequences_ aligned with SequencesGroup after beam updates.
+    last_batch[i].refresh_sequences_from_groups();
   }
 }
 
@@ -1130,7 +1216,7 @@ void LLMEngine::process_eplb_data(
 std::vector<RawForwardInput> LLMEngine::prepare_inputs(
     std::vector<Batch>& batch) {
   std::vector<RawForwardInput> batched_inputs;
-  batched_inputs.reserve(dp_size_);
+  batched_inputs.reserve(dp_size_ * cp_size_);
   // some dp related variables
   std::vector<int32_t> dp_global_token_nums(dp_size_);
   std::vector<int32_t> dp_is_decode(dp_size_, 0);
@@ -1141,8 +1227,8 @@ std::vector<RawForwardInput> LLMEngine::prepare_inputs(
 
   // build model input for every single micro batch
   for (auto dp_rank = 0; dp_rank < dp_size_; ++dp_rank) {
-    batched_inputs.emplace_back(std::move(
-        batch[dp_rank].prepare_forward_input(args_, threadpool_.get())));
+    batched_inputs.emplace_back(std::move(batch[dp_rank].prepare_forward_input(
+        args_, threadpool_.get(), cp_size_)));
     dp_global_token_nums[dp_rank] =
         batched_inputs[dp_rank].flatten_tokens_vec.size();
     if (batch_forward_type.is_empty() &&

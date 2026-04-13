@@ -26,7 +26,7 @@ limitations under the License.
 #include "core/layers/npu/npu_qwen3_decoder_layer_impl.h"
 #include "llm_model_base.h"
 
-namespace xllm {
+namespace xllm::npu::model {
 
 class QWen3DecoderLayerImpl
     : public LlmDecoderLayerImplBase<layer::NpuQwen3DecoderLayer> {
@@ -148,7 +148,6 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
     auto target_cos_sin_chunks = target_cos_sin.chunk(/*chunks=*/2, /*dim=*/-1);
     auto cos_pos = target_cos_sin_chunks[0].contiguous();
     auto sin_pos = target_cos_sin_chunks[1].contiguous();
-
     if (positions.dim() == 2) {  // mrope
       auto apply = [this](torch::Tensor x) {
         auto freqs_t = x[0].clone();
@@ -164,12 +163,13 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
           // idx_first_half: [offset, offset+3, offset+6, ... < mrop_length]
           // idx_second_half: [mrop_length+offset, mrop_length+offset+3,
           //     mrop_length+offset+6, ... < 2*mrop_length]
-          auto idx_first_half = torch::arange(offset, length, 3, torch::kLong);
+          torch::TensorOptions options =
+              torch::TensorOptions().dtype(torch::kLong).device(x.device());
+          auto idx_first_half = torch::arange(offset, length, 3, options);
           auto idx_second_half = torch::arange(
-              offset + mrop_length, length + mrop_length, 3, torch::kLong);
+              offset + mrop_length, length + mrop_length, 3, options);
 
-          auto idx_tensor =
-              torch::cat({idx_first_half, idx_second_half}, 0).to(x.device());
+          auto idx_tensor = torch::cat({idx_first_half, idx_second_half}, 0);
           // freqs_t[..., idx] = freqs[dim_idx][..., idx]
           auto src = x[dim_idx].index_select(-1, idx_tensor);
           freqs_t.index_copy_(-1, idx_tensor, src);
@@ -296,10 +296,10 @@ class QWen3ForCausalLMImpl : public LlmForCausalLMImplBase<QWen3Model> {
 TORCH_MODULE(QWen3ForCausalLM);
 
 // register the causal model
-REGISTER_CAUSAL_MODEL(qwen3, QWen3ForCausalLM);
+REGISTER_CAUSAL_MODEL_WITH_VARNAME(qwen3_atb, qwen3_atb, QWen3ForCausalLM);
 
 // register the model args
-REGISTER_MODEL_ARGS(qwen3, [&] {
+REGISTER_MODEL_ARGS_WITH_VARNAME(qwen3_atb, qwen3_atb, [&] {
   LOAD_ARG_OR(model_type, "model_type", "qwen3");
   LOAD_ARG_OR(dtype, "torch_dtype", "");
   LOAD_ARG_OR(vocab_size, "vocab_size", 152064);
@@ -332,4 +332,4 @@ REGISTER_MODEL_ARGS(qwen3, [&] {
   SET_ARG(stop_token_ids, std::unordered_set<int32_t>({args->eos_token_id()}));
 });
 
-}  // namespace xllm
+}  // namespace xllm::npu::model

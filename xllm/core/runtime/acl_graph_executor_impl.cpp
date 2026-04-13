@@ -47,6 +47,30 @@ limitations under the License.
 
 namespace xllm::npu {
 
+namespace {
+std::pair<torch::Tensor, torch::Tensor> find_attention_plan_kv_cache(
+    const std::vector<KVCache>& kv_caches) {
+  for (const auto& cache : kv_caches) {
+    auto k_cache = cache.get_k_cache();
+    auto v_cache = cache.get_v_cache();
+    if (k_cache.defined() && v_cache.defined() && k_cache.numel() > 0 &&
+        v_cache.numel() > 0) {
+      return {std::move(k_cache), std::move(v_cache)};
+    }
+  }
+  return {torch::Tensor(), torch::Tensor()};
+}
+
+int64_t get_decode_graph_capacity(const runtime::Options& options) {
+  CHECK_GT(options.num_decoding_tokens(), 0)
+      << "num_decoding_tokens must be > 0 for graph capacity";
+  if (FLAGS_enable_atb_spec_kernel) {
+    return options.max_seqs_per_batch();
+  }
+  return options.max_seqs_per_batch() * options.num_decoding_tokens();
+}
+}  // namespace
+
 // GraphPersistentParam implementation
 GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
                                            const torch::Device& device,
@@ -71,7 +95,7 @@ GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
   // num_decode_tokens
   const int64_t max_tokens_per_batch = FLAGS_max_tokens_per_batch;
   // num_sequences
-  const int64_t max_seqs_per_batch = options.max_seqs_per_batch();
+  const int64_t max_seqs_per_batch = get_decode_graph_capacity(options);
   auto tensor_options = torch::TensorOptions().device(device);
 
   const int64_t max_seq_len = args_.max_position_embeddings();
@@ -79,14 +103,13 @@ GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
   // Create persistent tensors with max_tokens_per_batch as first dimension
   persistent_tokens_ = torch::zeros({max_tokens_per_batch},
                                     torch::dtype(torch::kInt).device(device));
-  // mRoPE positions have shape [3, num_tokens], regular positions have shape
-  // [num_tokens]
-  if (use_mrope_) {
-    persistent_positions_ = torch::zeros(
-        {3, max_tokens_per_batch}, torch::dtype(torch::kInt).device(device));
-  } else {
+  if (args.rope_scaling_mrope_section().empty()) {
     persistent_positions_ = torch::zeros(
         {max_tokens_per_batch}, torch::dtype(torch::kInt).device(device));
+  } else {
+    persistent_positions_ = torch::zeros(
+        {3, max_tokens_per_batch}, torch::dtype(torch::kInt).device(device));
+    use_mrope_ = true;
   }
   persistent_new_cache_slots_ = torch::zeros(
       {max_tokens_per_batch}, torch::dtype(torch::kInt).device(device));
@@ -240,7 +263,7 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
   if (params.q_cu_seq_lens.defined()) {
     // Lazy initialization: if q_cu_seq_lens_ is not initialized, initialize it
     if (q_cu_seq_lens_.numel() == 0) {
-      const int64_t max_seqs_per_batch = options_.max_seqs_per_batch();
+      const int64_t max_seqs_per_batch = get_decode_graph_capacity(options_);
       q_cu_seq_lens_ = torch::zeros({max_seqs_per_batch + 1},
                                     torch::dtype(torch::kInt).device(device_));
     }
@@ -255,11 +278,10 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
   }
 
   if (tiling_data_.numel() > 0) {
-    // Get current stream for tiling tensor update
     aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
 
-    // Update tiling tensor based on model type
-    if (need_update_attention_plan_) {
+    if (need_update_attention_plan_ && k_cache.defined() && v_cache.defined() &&
+        k_cache.numel() > 0 && v_cache.numel() > 0) {
       plan_paged_attention_tiling(
           tokens, k_cache, v_cache, persistent_block_tables_, params, stream);
     }
@@ -309,6 +331,7 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
                                /*start=*/0,
                                /*end=*/actual_batch_size);
     }
+
     return params_for_capture;
   }
   return std::nullopt;
@@ -782,9 +805,12 @@ bool AclGraph::capture(CausalLM* model,
   aclrtStream stream =
       c10_npu::getCurrentNPUStream(tensor_options.device().index()).stream();
 
-  // Update persistent parameters with input data before capture
-  const torch::Tensor& k_cache = kv_cache[0].get_k_cache();
-  const torch::Tensor& v_cache = kv_cache[0].get_v_cache();
+  // For hybrid models (e.g., qwen3_next with mixed GDN/full_attention layers),
+  // we need to find the first Full Attention layer to get the correct kv_cache.
+  // GDN layers have empty key_cache_/value_cache_ while Full Attention layers
+  // have valid kv caches. Using layer 0's cache directly would be incorrect
+  // if layer 0 is a GDN layer.
+  auto [k_cache, v_cache] = find_attention_plan_kv_cache(kv_cache);
   const uint32_t actual_num_tokens = tokens.size(0);
   CHECK_GE(num_tokens_, actual_num_tokens)
       << "num_tokens_ >= actual_num_tokens";
@@ -883,8 +909,11 @@ ModelOutput AclGraph::replay(const torch::Tensor& tokens,
       << actual_num_tokens;
 
   // Update persistent parameters with new input data
-  const torch::Tensor& k_cache = kv_cache[0].get_k_cache();
-  const torch::Tensor& v_cache = kv_cache[0].get_v_cache();
+  // Note: tiling_data is updated in update() if needed - for hybrid models
+  // (e.g., qwen3_next with mixed GDN/attention layers), tiling should only
+  // be updated when Full Attention layers are involved, which is determined
+  // by k_cache being valid and non-empty
+  auto [k_cache, v_cache] = find_attention_plan_kv_cache(kv_cache);
   persistent_param_.update(tokens,
                            k_cache,
                            v_cache,
@@ -922,7 +951,8 @@ AclGraphExecutorImpl::AclGraphExecutorImpl(CausalLM* model,
 
 ForwardInput AclGraphExecutorImpl::prepare_inputs(Batch& batch) {
   // Prepare inputs for workers
-  return batch.prepare_forward_input(options_.num_decoding_tokens(), 0, args_);
+  return batch.prepare_forward_input(
+      options_.num_decoding_tokens(), 0, args_, options_.cp_size());
 }
 
 // Main execution method with graph optimization for decode phase

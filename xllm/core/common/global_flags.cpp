@@ -71,10 +71,6 @@ DEFINE_string(devices,
               "npu:0",
               "Devices to run the model on, e.g. npu:0, npu:0,npu:1.");
 
-DEFINE_bool(enable_mla,
-            false,
-            "Whether to enable multi-head latent attention.");
-
 DEFINE_bool(enable_customize_mla_kernel, false, "enable customize mla kernel");
 
 // --- graph mode execution config ---
@@ -197,6 +193,20 @@ DEFINE_bool(enable_online_preempt_offline,
             true,
             "Whether to enable online preempt offline.");
 
+// --- mix scheduler scheduling config ---
+
+DEFINE_double(aggressive_coeff,
+              1.0,
+              "Aggressive coefficient for MixScheduler urgency judgment.");
+
+DEFINE_double(starve_threshold,
+              1.0,
+              "Starvation threshold coefficient for MixScheduler.");
+
+DEFINE_bool(enable_starve_prevent,
+            true,
+            "Whether to enable anti-starvation in MixScheduler.");
+
 // for rec, it's better to set to 100;
 DEFINE_int32(request_queue_size,
              100000,
@@ -207,6 +217,8 @@ DEFINE_int32(request_queue_size,
 DEFINE_int32(dp_size, 1, "Data parallel size for MLA attention.");
 
 DEFINE_int32(ep_size, 1, "Expert parallel size for MoE model.");
+
+DEFINE_int32(cp_size, 1, "Context parallel size for DSA attention.");
 
 DEFINE_string(
     communication_backend,
@@ -386,8 +398,9 @@ DEFINE_bool(speculative_suffix_use_tree_spec,
 
 DEFINE_bool(enable_opt_validate_probs,
             false,
-            "Whether to use optimized draft_probs handling in speculative "
-            "validation.");
+            "Whether validate uses selected-only draft_probs [B,S] directly. "
+            "If false, selected-only cache values are restored to dense "
+            "[B,S,V].");
 
 DEFINE_bool(enable_atb_spec_kernel,
             false,
@@ -395,9 +408,15 @@ DEFINE_bool(enable_atb_spec_kernel,
 
 // --- block copy config ---
 
+#if defined(USE_NPU)
 DEFINE_bool(enable_block_copy_kernel,
             true,
-            "Whether to use ATB block copy kernel.");
+            "Whether to use ATB block copy kernel. NPU-only.");
+#else
+DEFINE_bool(enable_block_copy_kernel,
+            false,
+            "Whether to use ATB block copy kernel. NPU-only.");
+#endif
 
 // --- service routing config ---
 
@@ -584,7 +603,7 @@ DEFINE_int32(random_seed, -1, "Random seed for random number generator.");
 DEFINE_string(dit_cache_policy,
               "TaylorSeer",
               "The policy of dit cache(e.g. None, FBCache, TaylorSeer, "
-              "FBCacheTaylorSeer).");
+              "FBCacheTaylorSeer, ResidualCache).");
 
 DEFINE_int64(dit_cache_warmup_steps, 0, "The number of warmup steps.");
 
@@ -606,6 +625,44 @@ DEFINE_bool(enable_constrained_decoding,
             "that the output meets specific format or structural requirements "
             "through pre-defined rules.");
 
+DEFINE_int64(dit_cache_start_steps,
+             5,
+             "The number of steps to skip at the start");
+
+DEFINE_int64(dit_cache_end_steps, 5, "The number of steps to skip at the end.");
+
+DEFINE_int64(dit_cache_start_blocks,
+             5,
+             "The number of blocks to skip at the start.");
+
+DEFINE_int64(dit_cache_end_blocks,
+             5,
+             "The number of blocks to skip at the end.");
+
+// --- dit parallel config ---
+
+DEFINE_int64(tp_size, 1, "Tensor parallelism size");
+
+DEFINE_int64(sp_size, 1, "Sequence parallelism size");
+
+DEFINE_int64(cfg_size, 1, "Classifier-free guidiance parallelism size");
+
+DEFINE_int64(dit_sp_communication_overlap,
+             1,
+             "Communication & Computation overlap for sequence parallel");
+
+// --- dit debug ---
+
+DEFINE_bool(dit_debug_print,
+            false,
+            "whether print the debug info for dit models");
+
+// --- embedding type ---
+
+DEFINE_bool(enable_return_mm_full_embeddings,
+            false,
+            "return vit and sequence embeddings for vlm models");
+
 DEFINE_bool(
     use_audio_in_video,
     false,
@@ -618,15 +675,9 @@ DEFINE_uint32(rec_worker_max_concurrency,
               "equal to 1 means disable concurrent rec worker.");
 
 #if defined(USE_NPU)
-// USE_NPU_TORCH: Temporary flag used for debugging qwen3 torch NPU graph
-// capture. This variable may be removed in the future.
 DEFINE_string(npu_kernel_backend,
-#if defined(USE_NPU_TORCH)
-              "TORCH",
-#else
-              "ATB",
-#endif
-              "NPU kernel backend. Supported options: ATB, TORCH.");
+              "AUTO",
+              "NPU kernel backend. Supported options: AUTO, ATB, TORCH.");
 
 DEFINE_bool(enable_intralayer_addnorm,
             false,

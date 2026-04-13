@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include <functional>
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
@@ -28,9 +29,12 @@ limitations under the License.
 #include "qwen3_rerank_service_impl.h"
 #include "rec_completion_service_impl.h"
 #include "rerank_service_impl.h"
+#include "sample_service_impl.h"
 #include "xllm_service.pb.h"
 
 namespace xllm {
+
+class ClosureGuard;
 
 class APIService : public proto::XllmAPIService {
  public:
@@ -48,6 +52,16 @@ class APIService : public proto::XllmAPIService {
                        const proto::HttpRequest* request,
                        proto::HttpResponse* response,
                        ::google::protobuf::Closure* done) override;
+
+  void Sample(::google::protobuf::RpcController* controller,
+              const proto::SampleRequest* request,
+              proto::SampleResponse* response,
+              ::google::protobuf::Closure* done) override;
+
+  void SampleHttp(::google::protobuf::RpcController* controller,
+                  const proto::HttpRequest* request,
+                  proto::HttpResponse* response,
+                  ::google::protobuf::Closure* done) override;
 
   void ChatCompletions(::google::protobuf::RpcController* controller,
                        const proto::ChatRequest* request,
@@ -160,6 +174,13 @@ class APIService : public proto::XllmAPIService {
                      ::google::protobuf::Closure* done) override;
 
  private:
+  using ChatHttpHandler = std::function<void(ClosureGuard&,
+                                             brpc::Controller*,
+                                             const proto::HttpRequest*,
+                                             proto::HttpResponse*)>;
+
+  void register_chat_completions_handler();
+
   bool ParseForkMasterRequest(const proto::MasterInfos* request,
                               Options& options);
   void set_model_master(const std::string& model_id, Master* master);
@@ -168,10 +189,12 @@ class APIService : public proto::XllmAPIService {
   Master* get_model_master(const std::string& model_id) const;
 
   Master* master_;
+  ChatHttpHandler chat_completions_handler_;
   mutable std::shared_mutex masters_mutex_;
   std::unordered_map<std::string, Master*> masters_;
   std::unique_ptr<AnthropicServiceImpl> anthropic_service_impl_;
   std::unique_ptr<CompletionServiceImpl> completion_service_impl_;
+  std::unique_ptr<SampleServiceImpl> sample_service_impl_;
   std::unique_ptr<ChatServiceImpl> chat_service_impl_;
   std::unique_ptr<MMChatServiceImpl> mm_chat_service_impl_;
   std::unique_ptr<EmbeddingServiceImpl> embedding_service_impl_;

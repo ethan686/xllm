@@ -16,6 +16,7 @@ limitations under the License.
 
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <ostream>
@@ -130,6 +131,7 @@ struct ModelArgs {
   PROPERTY(int32_t, topk_group) = 0;
   PROPERTY(std::string, scoring_func);
   // deepseek v2/v3 MLA
+  PROPERTY(bool, enable_mla) = false;
   PROPERTY(int32_t, qk_nope_head_dim) = 0;
   PROPERTY(int32_t, qk_rope_head_dim) = 0;
   PROPERTY(int32_t, v_head_dim) = 0;
@@ -170,6 +172,18 @@ struct ModelArgs {
   PROPERTY(bool, output_router_logits) = false;
   PROPERTY(int32_t, rope_scaling) = -1;
   PROPERTY(float, router_aux_loss_coef) = 0.001f;
+
+  // qwen3 next initialized with 0, and will be loaded in model file
+  PROPERTY(bool, attn_output_gate) = false;
+  PROPERTY(int32_t, full_attention_interval) = 0;
+  PROPERTY(int32_t, linear_conv_kernel_dim) = 0;
+  PROPERTY(int32_t, linear_key_head_dim) = 0;
+  PROPERTY(int32_t, linear_value_head_dim) = 0;
+  PROPERTY(int64_t, linear_num_key_heads) = 0;
+  PROPERTY(int32_t, linear_num_value_heads) = 0;
+  PROPERTY(int32_t, shared_expert_intermediate_size) = 0;
+  PROPERTY(float, partial_rotary_factor) = 0.0f;
+  PROPERTY(std::vector<std::string>, layer_types) = {};
 
   // Vision model's dropout
   PROPERTY(float, mm_dropout) = 0.0f;
@@ -224,6 +238,9 @@ struct ModelArgs {
 
   // Vision model's mm_projection_dim
   PROPERTY(int64_t, mm_projection_dim) = 0;
+
+  // Vision model's mm_projector_hidden_size
+  PROPERTY(int64_t, mm_projector_hidden_size) = 0;
 
   PROPERTY(int64_t, mm_spatial_merge_size) = 0;
   PROPERTY(int64_t, mm_spatial_patch_size) = 0;
@@ -383,12 +400,43 @@ struct ModelArgs {
   PROPERTY(bool, use_quant_conv) = false;
   PROPERTY(bool, use_post_quant_conv) = false;
 
+  // Wan_2.2_ VAE related args
+  PROPERTY(int64_t, vae_in_channels) = -1;
+  PROPERTY(int64_t, vae_out_channels) = -1;
+  PROPERTY(int64_t, vae_base_dim) = 0;
+  PROPERTY(int64_t, vae_z_dim) = 0;
+  PROPERTY(int64_t, vae_scale_factor_temporal) = 0;
+  PROPERTY(int64_t, vae_scale_factor_spatial) = 0;
+  PROPERTY(std::vector<int64_t>, vae_dim_mult) = {};
+  PROPERTY(int64_t, vae_num_res_blocks) = 0;
+  PROPERTY(std::vector<double>, vae_attn_scales) = {};
+  PROPERTY(std::vector<bool>, vae_temporal_downsample) = {};
+  PROPERTY(std::vector<double>, vae_latents_mean) = {};
+  PROPERTY(std::vector<double>, vae_latents_std) = {};
+  PROPERTY(double, vae_dropout) = 0.0;
+  PROPERTY(bool, vae_is_residual) = false;
+
   // dit related args
   PROPERTY(int64_t, joint_attention_dim) = 0;
   PROPERTY(int64_t, pooled_projection_dim) = 0;
   PROPERTY(bool, guidance_embeds) = true;
   PROPERTY(std::vector<int64_t>, axes_dims_rope) = {};
   PROPERTY(int64_t, num_single_layers) = 0;
+  PROPERTY(int, timestep_guidance_channels) = 256;
+  PROPERTY(double, eps) = 1e-6;
+  PROPERTY(int64_t, patch_size) = 1;
+  PROPERTY(std::vector<int64_t>, wan_patch_size) = { 1, 2, 2 };
+  PROPERTY(bool, cross_attn_norm) = true;
+  PROPERTY(int64_t, ffn_dim) = 13824;
+  PROPERTY(int64_t, time_freq_dim) = 256;
+  PROPERTY(int64_t, dit_in_channels) = 36;
+  PROPERTY(int64_t, dit_out_channels) = 16;
+  PROPERTY(std::string, qk_norm) = "rms_norm_across_heads";
+  PROPERTY(int64_t, rope_max_seq_len) = 1024;
+  PROPERTY(int64_t, text_embed_dim) = 4096;
+  PROPERTY(int64_t, image_embed_dim) = -1;
+  PROPERTY(int64_t, added_kv_proj_dim) = -1;
+  PROPERTY(int64_t, pos_embed_seq_len) = -1;
 
   // t5 related args
   PROPERTY(int64_t, d_model) = 0;
@@ -408,7 +456,79 @@ struct ModelArgs {
   PROPERTY(float, max_shift) = 0;
   PROPERTY(int64_t, base_image_seq_len) = 0;
   PROPERTY(int64_t, max_image_seq_len) = 0;
+  PROPERTY(float, shift_terminal) = 0;
+  PROPERTY(float, beta_start) = 0.0001f;
+  PROPERTY(float, beta_end) = 0.02f;
+  PROPERTY(std::string, beta_schedule) = "linear";
+  PROPERTY(std::vector<float>, trained_betas) = {};
+  PROPERTY(int64_t, solver_order) = 2;
+  PROPERTY(std::string, prediction_type) = "flow_prediction";
+  PROPERTY(bool, thresholding) = false;
+  PROPERTY(float, dynamic_thresholding_ratio) = 0.995f;
+  PROPERTY(float, sample_max_value) = 1.0f;
+  PROPERTY(bool, predict_x0) = true;
+  PROPERTY(std::string, solver_type) = "bh2";
+  PROPERTY(bool, lower_order_final) = true;
+  PROPERTY(std::vector<int64_t>, disable_corrector) = {};
+  PROPERTY(bool, use_karras_sigmas) = false;
+  PROPERTY(bool, use_exponential_sigmas) = false;
+  PROPERTY(bool, use_beta_sigmas) = false;
+  PROPERTY(bool, use_flow_sigmas) = true;
+  PROPERTY(float, flow_shift) = 3.0f;
+  PROPERTY(std::string, timestep_spacing) = "linspace";
+  PROPERTY(int64_t, steps_offset) = 0;
+  PROPERTY(std::string, final_sigmas_type) = "zero";
+  PROPERTY(bool, rescale_betas_zero_snr) = false;
+  PROPERTY(std::string, time_shift_type) = "exponential";
+  PROPERTY(float, sigma_min) = 0.0f;
+  PROPERTY(float, sigma_max) = 0.0f;
+
+  // qwen_image_edit_2509 vae related args
+  PROPERTY(int64_t, base_dim) = 0;
+  PROPERTY(int64_t, z_dim) = 0;
+  PROPERTY(std::vector<int64_t>, dim_mult) = {};
+  PROPERTY(std::vector<double>, attn_scales) = {};
+  PROPERTY(std::vector<bool>, temperal_downsample) = {};
+  PROPERTY(int64_t, num_res_blocks) = 0;
+  PROPERTY(double, dropout) = 0;
+  PROPERTY(std::vector<double>, latents_mean) = {};
+  PROPERTY(std::vector<double>, latents_std) = {};
+
+  // qwen_image_edit_2511 dit related args
+  PROPERTY(bool, zero_cond_t) = false;
+  PROPERTY(bool, use_additional_t_cond) = false;
+  PROPERTY(bool, use_layer3d_rope) = false;
 };
+
+// Qwen hybrid models may describe full-attention layers explicitly via
+// layer_types or implicitly via full_attention_interval.
+inline bool is_full_attention_layer(const ModelArgs& args, int64_t layer_id) {
+  const auto& hybrid_layer_types = args.layer_types();
+  if (layer_id >= 0 &&
+      layer_id < static_cast<int64_t>(hybrid_layer_types.size())) {
+    const auto& layer_type = hybrid_layer_types[layer_id];
+    return layer_type == "full_attention" || layer_type == "attention";
+  }
+
+  int32_t attention_interval = args.full_attention_interval();
+  if (attention_interval <= 0) {
+    attention_interval = 4;
+  }
+  return (layer_id + 1) % attention_interval == 0;
+}
+
+inline bool has_linear_attention_layers(const ModelArgs& args) {
+  const auto& hybrid_layer_types = args.layer_types();
+  if (!hybrid_layer_types.empty()) {
+    return std::any_of(hybrid_layer_types.begin(),
+                       hybrid_layer_types.end(),
+                       [](const std::string& layer_type) {
+                         return layer_type != "full_attention" &&
+                                layer_type != "attention";
+                       });
+  }
+  return args.full_attention_interval() > 1;
+}
 
 inline std::ostream& operator<<(std::ostream& os, const ModelArgs& args) {
   os << "ModelArgs: [model_type: " << args.model_type();

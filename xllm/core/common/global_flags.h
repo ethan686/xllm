@@ -98,8 +98,6 @@ DECLARE_double(eplb_update_threshold);
 
 DECLARE_string(rank_tablefile);
 
-DECLARE_bool(enable_mla);
-
 constexpr int32_t kGraphExecutorLogVerboseLevel = 50;
 
 DECLARE_bool(enable_graph);
@@ -131,6 +129,8 @@ DECLARE_int32(node_rank);
 DECLARE_int32(dp_size);
 
 DECLARE_int32(ep_size);
+
+DECLARE_int32(cp_size);
 
 DECLARE_string(instance_role);
 
@@ -189,6 +189,13 @@ DECLARE_string(priority_strategy);
 DECLARE_bool(use_mix_scheduler);
 
 DECLARE_bool(enable_online_preempt_offline);
+
+// --- mix scheduler config ---
+DECLARE_double(aggressive_coeff);
+
+DECLARE_double(starve_threshold);
+
+DECLARE_bool(enable_starve_prevent);
 
 DECLARE_double(host_blocks_factor);
 
@@ -285,6 +292,24 @@ DECLARE_int64(dit_cache_skip_interval_steps);
 DECLARE_double(dit_cache_residual_diff_threshold);
 
 DECLARE_bool(enable_constrained_decoding);
+
+DECLARE_bool(enable_return_mm_full_embeddings);
+
+DECLARE_int64(dit_cache_start_steps);
+
+DECLARE_int64(dit_cache_end_steps);
+
+DECLARE_int64(dit_cache_start_blocks);
+
+DECLARE_int64(dit_cache_end_blocks);
+
+DECLARE_int64(tp_size);
+
+DECLARE_int64(sp_size);
+
+DECLARE_int64(cfg_size);
+
+DECLARE_bool(dit_debug_print);
 
 // --- multi-step decode config ---
 
