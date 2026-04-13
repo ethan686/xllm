@@ -340,11 +340,13 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
                                  num_videos_per_prompt,
                                  max_sequence_length);
       }
-    } else if (!negative_prompt_embeds_tensor.defined()) {
-      int64_t seq_len = prompt_embeds_tensor.size(1);
-      int64_t hidden_dim = prompt_embeds_tensor.size(2);
-      negative_prompt_embeds_tensor = torch::zeros(
-          {batch_size, seq_len, hidden_dim}, prompt_embeds_tensor.options());
+    } else if (negative_prompt_embeds.has_value()) {
+      negative_prompt_embeds_tensor = negative_prompt_embeds.value();
+    }
+    if (!negative_prompt_embeds_tensor.defined()) {
+      std::vector<std::string> empty_prompt = {""};
+      negative_prompt_embeds_tensor = get_t5_prompt_embeds(
+          empty_prompt, num_videos_per_prompt, max_sequence_length);
     }
 
     return {prompt_embeds_tensor, negative_prompt_embeds_tensor};
@@ -546,13 +548,14 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
                                    timestep_input,
                                    encoded_negative_embeds,
                                    torch::Tensor());
-        noise_pred =
-            noise_uncond + current_guidance * (noise_pred - noise_uncond);
+        noise_uncond +
+            torch::scalar_tensor(current_guidance, noise_pred.options()) *
+                (noise_pred - noise_uncond);
         noise_uncond.reset();
       }
 
       auto prev_latents = scheduler_->step(noise_pred, t, prepared_latents);
-      prepared_latents = prev_latents.detach();
+      prepared_latents = prev_latents.detach().to(options_.dtype());
       noise_pred.reset();
       prev_latents = torch::Tensor();
 

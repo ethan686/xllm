@@ -237,7 +237,7 @@ class UniPCMultistepSchedulerImpl : public torch::nn::Module {
     }
 
     timesteps_ = timesteps_tensor.to(device);
-    sigmas_ = sigmas_tensor.to(torch::kCPU);
+    sigmas_ = sigmas_tensor.to(device);
     num_inference_steps_ = num_steps;
 
     model_outputs_.clear();

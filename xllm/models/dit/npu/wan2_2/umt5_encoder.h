@@ -646,6 +646,7 @@ class UMT5EncoderModelImpl : public torch::nn::Module {
     }
     verify_loaded_weights();
     LOG(INFO) << "UMT5EncoderModel loaded successfully.";
+    this->to(torch::kBFloat16);
   }
 
   void verify_loaded_weights() const {
