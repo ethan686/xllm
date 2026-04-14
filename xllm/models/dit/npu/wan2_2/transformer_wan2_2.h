@@ -1116,6 +1116,7 @@ class WanTransformerBlockImpl : public torch::nn::Module {
     torch::Tensor hidden_states = hidden_states_in;
     torch::Tensor shift_msa, scale_msa, gate_msa, c_shift_msa, c_scale_msa,
         c_gate_msa;
+    LOG(INFO) << "______________TransformerBlock0________________________";
 
     if (timestep_proj.dim() == 4) {
       auto scale_shift =
@@ -1137,36 +1138,48 @@ class WanTransformerBlockImpl : public torch::nn::Module {
       c_scale_msa = splits[4];
       c_gate_msa = splits[5];
     }
+    LOG(INFO) << "______________TransformerBlock1________________________";
 
     torch::Tensor norm_hidden_states =
         (norm1_->forward(hidden_states.to(torch::kFloat32)) * (1 + scale_msa) +
          shift_msa)
             .to(hidden_states.dtype());
+    LOG(INFO) << "______________TransformerBlock2________________________";
     torch::Tensor attn_output =
         attn1_->forward(norm_hidden_states, norm_hidden_states, rotary_emb);
+    LOG(INFO) << "______________TransformerBlock3________________________";
 
     hidden_states = (hidden_states.to(torch::kFloat32) + attn_output * gate_msa)
                         .to(hidden_states.dtype());
+    LOG(INFO) << "______________TransformerBlock4________________________";
 
     if (cross_attn_norm_) {
+      LOG(INFO) << "______________TransformerBlock5________________________";
       norm_hidden_states = norm2_->forward(hidden_states.to(torch::kFloat32))
                                .to(hidden_states.dtype());
+      LOG(INFO) << "______________TransformerBlock6________________________";
     } else {
       norm_hidden_states = hidden_states;
     }
+    LOG(INFO) << "______________TransformerBlock7________________________";
     attn_output = attn2_->forward(
         norm_hidden_states, encoder_hidden_states, std::nullopt);
+    LOG(INFO) << "______________TransformerBlock8________________________";
 
     hidden_states = hidden_states + attn_output;
+    LOG(INFO) << "______________TransformerBlock9________________________";
 
     norm_hidden_states = (norm3_->forward(hidden_states.to(torch::kFloat32)) *
                               (1 + c_scale_msa) +
                           c_shift_msa)
                              .to(hidden_states.dtype());
+    LOG(INFO) << "______________TransformerBlock10________________________";
     torch::Tensor ff_output = ff_->forward(norm_hidden_states);
+    LOG(INFO) << "______________TransformerBlock11________________________";
     hidden_states = (hidden_states.to(torch::kFloat32) +
                      ff_output.to(torch::kFloat32) * c_gate_msa)
                         .to(hidden_states.dtype());
+    LOG(INFO) << "______________TransformerBlock12________________________";
     return hidden_states;
   }
 
@@ -1298,11 +1311,15 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
     int64_t post_patch_width = width / p_w;
 
     torch::Tensor hidden_states = hidden_states_in;
+    LOG(INFO) << "______________Transformer3D1________________________";
 
     auto [freqs_cos, freqs_sin] = rope_->forward(hidden_states);
+    LOG(INFO) << "______________Transformer3D2________________________";
     auto rotary_emb = std::make_pair(freqs_cos, freqs_sin);
+    LOG(INFO) << "______________Transformer3D3________________________";
 
     hidden_states = patch_embedding_->forward(hidden_states);
+    LOG(INFO) << "______________Transformer3D4________________________";
     hidden_states = hidden_states.flatten(2).transpose(1, 2);
 
     torch::Tensor timestep_input = timestep;
@@ -1311,6 +1328,7 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
       ts_seq_len = timestep.size(1);
       timestep_input = timestep.flatten();
     }
+    LOG(INFO) << "______________Transformer3D5________________________";
 
     auto [temb,
           timestep_proj,
@@ -1320,6 +1338,7 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
                                      encoder_hidden_states,
                                      encoder_hidden_states_image,
                                      ts_seq_len);
+    LOG(INFO) << "______________Transformer3D6________________________";
 
     if (ts_seq_len.has_value()) {
       timestep_proj =
@@ -1327,6 +1346,7 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
     } else {
       timestep_proj = timestep_proj.view({batch_size, 6, -1});
     }
+    LOG(INFO) << "______________Transformer3D7________________________";
 
     if (encoder_hidden_states_image_embedded.defined()) {
       encoder_hidden_states_embedded =
@@ -1334,41 +1354,55 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
                       encoder_hidden_states_embedded},
                      1);
     }
+    LOG(INFO) << "______________Transformer3D8________________________";
 
     for (int64_t i = 0; i < transformer_layers_.size(); ++i) {
+      LOG(INFO) << "______________Transformer3D9________________________";
       hidden_states =
           transformer_layers_[i]->forward(hidden_states,
                                           encoder_hidden_states_embedded,
                                           timestep_proj,
                                           rotary_emb);
+      LOG(INFO) << "______________Transformer3D10________________________";
     }
 
     torch::Tensor shift, scale;
     if (temb.dim() == 3) {
+      LOG(INFO) << "______________Transformer3D11________________________";
       auto scale_shift =
           scale_shift_table_.unsqueeze(0).to(temb.device()) + temb.unsqueeze(2);
+      LOG(INFO) << "______________Transformer3D12________________________";
       auto splits = scale_shift.chunk(2, 2);
+      LOG(INFO) << "______________Transformer3D13________________________";
       shift = splits[0].squeeze(2);
       scale = splits[1].squeeze(2);
+      LOG(INFO) << "______________Transformer3D14________________________";
     } else {
+      LOG(INFO) << "______________Transformer3D15________________________";
       auto scale_shift =
           scale_shift_table_.to(temb.device()) + temb.unsqueeze(1);
+      LOG(INFO) << "______________Transformer3D16________________________";
       auto splits = scale_shift.chunk(2, 1);
+      LOG(INFO) << "______________Transformer3D17________________________";
       shift = splits[0];
       scale = splits[1];
     }
-
+    LOG(INFO) << "______________Transformer3D18________________________";
     shift = shift.to(hidden_states.device());
     scale = scale.to(hidden_states.device());
+    LOG(INFO) << "______________Transformer3D19________________________";
 
     shift = shift.to(torch::kFloat32);
     scale = scale.to(torch::kFloat32);
+    LOG(INFO) << "______________Transformer3D20________________________";
 
     hidden_states =
         (norm_out_->forward(hidden_states.to(torch::kFloat32)) * (1 + scale) +
          shift)
             .to(hidden_states.dtype());
+    LOG(INFO) << "______________Transformer3D21________________________";
     hidden_states = proj_out_->forward(hidden_states);
+    LOG(INFO) << "______________Transformer3D22_______________________";
 
     hidden_states = hidden_states.view({batch_size,
                                         post_patch_num_frames,
@@ -1378,6 +1412,7 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
                                         p_h,
                                         p_w,
                                         -1});
+    LOG(INFO) << "hidden_states 的shape是：" << hidden_states.sizes();
     hidden_states = hidden_states.permute({0, 7, 1, 4, 2, 5, 3, 6});
     hidden_states = hidden_states.flatten(6, 7).flatten(4, 5).flatten(2, 3);
 
