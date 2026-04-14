@@ -65,64 +65,48 @@ inline torch::Tensor wan_apply_rotary_emb(const torch::Tensor& hidden_states,
 
 class FP32LayerNormImpl : public torch::nn::Module {
  public:
-  torch::Tensor weight;
-  torch::Tensor bias;
   FP32LayerNormImpl(int64_t normalized_shape,
                     double eps = 1e-6,
                     bool elementwise_affine = true)
       : normalized_shape_(normalized_shape),
         eps_(eps),
         elementwise_affine_(elementwise_affine) {
+    weight_ = torch::ones({normalized_shape}, torch::kFloat32);
+    bias_ = torch::zeros({normalized_shape}, torch::kFloat32);
     if (elementwise_affine) {
-      weight = register_parameter("weight", torch::ones({normalized_shape}));
-      bias = register_parameter("bias", torch::zeros({normalized_shape}));
+      weight_ = register_parameter("weight", weight_);
+      bias_ = register_parameter("bias", bias_);
     }
   }
 
   torch::Tensor forward(const torch::Tensor& x) {
     auto origin_dtype = x.dtype();
-    auto x_fp32 = x.to(torch::kFloat32);
-    torch::Tensor out;
-    if (elementwise_affine_) {
-      out = torch::layer_norm(x_fp32,
-                              std::vector<int64_t>{normalized_shape_},
-                              weight.to(torch::kFloat32),
-                              bias.to(torch::kFloat32),
-                              eps_);
-    } else {
-      out =
-          torch::layer_norm(x_fp32,
-                            std::vector<int64_t>{normalized_shape_},
-                            torch::ones({normalized_shape_}, x_fp32.options()),
-                            torch::zeros({normalized_shape_}, x_fp32.options()),
-                            eps_);
-    }
-    return out.to(origin_dtype);
+    return torch::layer_norm(
+               x.to(torch::kFloat32), {normalized_shape_}, weight_, bias_, eps_)
+        .to(origin_dtype);
   }
 
   void load_state_dict(const StateDict& state_dict) {
     if (elementwise_affine_) {
-      auto w = state_dict.get_tensor("weight");
-      if (w.defined()) {
-        weight.data().copy_(w);
-      }
-      auto b = state_dict.get_tensor("bias");
-      if (b.defined()) {
-        bias.data().copy_(b);
-      }
+      weight::load_weight(state_dict, "weight", weight_, weight_is_loaded_);
+      weight::load_weight(state_dict, "bias", bias_, bias_is_loaded_);
     }
   }
 
   void verify_loaded_weights(const std::string& prefix) const {
     if (elementwise_affine_) {
-      CHECK(weight.defined() && weight.numel() > 0)
-          << "Weight not loaded for " << prefix;
-      CHECK(bias.defined() && bias.numel() > 0)
-          << "Bias not loaded for " << prefix;
+      CHECK(weight_is_loaded_)
+          << "weight is not loaded for " << prefix + "weight";
+      CHECK(bias_is_loaded_) << "bias is not loaded for " << prefix + "bias";
     }
   }
 
  private:
+  torch::Tensor weight_;
+  torch::Tensor bias_;
+  bool weight_is_loaded_{false};
+  bool bias_is_loaded_{false};
+  torch::TensorOptions options_;
   int64_t normalized_shape_;
   double eps_;
   bool elementwise_affine_;
@@ -1165,6 +1149,7 @@ class WanTransformerBlockImpl : public torch::nn::Module {
     attn2_ = register_module(
         "attn2", WanAttention(context, parallel_args, dim_ / num_heads_));
     if (cross_attn_norm_) {
+      LOG(INFO) << "zhubowei WanTransformerBlockImpl cross_attn_norm_ true";
       norm2_ = register_module("norm2", FP32LayerNorm(dim_, eps_, true));
     }
     ff_ = register_module("ff",
@@ -1251,6 +1236,7 @@ class WanTransformerBlockImpl : public torch::nn::Module {
     attn1_->load_state_dict(state_dict.get_dict_with_prefix("attn1."));
     attn2_->load_state_dict(state_dict.get_dict_with_prefix("attn2."));
     if (cross_attn_norm_ && norm2_) {
+      LOG(INFO) << "zhubowei test norm2 load weight";
       norm2_->load_state_dict(state_dict.get_dict_with_prefix("norm2."));
     }
     ff_->load_state_dict(state_dict.get_dict_with_prefix("ffn."));
