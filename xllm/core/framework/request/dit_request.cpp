@@ -69,12 +69,21 @@ const DiTRequestOutput DiTRequest::generate_output() {
   result.width = state_.generation_params().width;
   result.seed = state_.generation_params().seed;
 
-  OpenCVImageEncoder encoder;
+  OpenCVImageEncoder img_encoder;
+  FFmpegVideoEncoder vid_encoder;
   int count = state_.generation_params().num_images_per_prompt;
   for (size_t idx = 0; idx < count; ++idx) {
-    torch::Tensor image =
+    torch::Tensor tensor =
         output_.tensors[idx].squeeze(0).cpu().to(torch::kFloat32).contiguous();
-    encoder.encode(image, result.image);
+    if (tensor.dim() == 4 || state_.generation_params().force_video_output) {
+      vid_encoder.encode(
+          tensor, state_.generation_params().video_fps, "mp4", result.image);
+      result.num_frames =
+          tensor.dim() >= 1 ? static_cast<int32_t>(tensor.size(0)) : 0;
+      result.video_fps = state_.generation_params().video_fps;
+    } else {
+      img_encoder.encode(tensor, result.image);
+    }
     output.outputs.push_back(result);
   }
 

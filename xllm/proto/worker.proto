@@ -240,6 +240,7 @@ message DiTGenerationParams {
   float strength = 9;
   bool enable_cfg_renorm = 10;
   float cfg_renorm_min = 11;
+  int32 num_frames = 12;
 }
 
 message ForwardInput {

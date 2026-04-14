@@ -919,6 +919,7 @@ bool generation_params_to_proto(
       dit_generation_params.enable_cfg_renorm);
   pb_dit_generation_params->set_cfg_renorm_min(
       dit_generation_params.cfg_renorm_min);
+  pb_dit_generation_params->set_num_frames(dit_generation_params.num_frames);
   return true;
 }
 
@@ -1022,6 +1023,7 @@ bool proto_to_generation_params(
       pb_dit_generation_params.enable_cfg_renorm();
   dit_generation_params.cfg_renorm_min =
       pb_dit_generation_params.cfg_renorm_min();
+  dit_generation_params.num_frames = pb_dit_generation_params.num_frames();
   return true;
 }
 

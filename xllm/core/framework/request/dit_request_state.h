@@ -43,7 +43,10 @@ struct DiTGenerationParams {
            max_sequence_length == other.max_sequence_length &&
            strength == other.strength &&
            enable_cfg_renorm == other.enable_cfg_renorm &&
-           cfg_renorm_min == other.cfg_renorm_min;
+           cfg_renorm_min == other.cfg_renorm_min &&
+           num_frames == other.num_frames &&
+           force_video_output == other.force_video_output &&
+           video_fps == other.video_fps;
   }
 
   bool operator!=(const DiTGenerationParams& other) const {
@@ -71,6 +74,12 @@ struct DiTGenerationParams {
   bool enable_cfg_renorm = true;
 
   float cfg_renorm_min = 0.0f;
+
+  int32_t num_frames = 81;
+
+  bool force_video_output = false;
+
+  double video_fps = 8.0;
 };
 
 struct DiTInputParams {

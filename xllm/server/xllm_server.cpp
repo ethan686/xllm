@@ -44,6 +44,7 @@ bool XllmServer::start(std::unique_ptr<APIService> service) {
                             "v1/embeddings => EmbeddingsHttp,"
                             "v1/models => ModelsHttp,"
                             "v1/image/generation => ImageGenerationHttp,"
+                            "v1/video/generation => VideoGenerationHttp,"
                             "v1/rerank => RerankHttp,"
                             "v1/messages => AnthropicMessagesHttp,"
                             "v2/repository/index => ModelVersionsHttp,"

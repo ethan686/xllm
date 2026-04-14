@@ -42,6 +42,12 @@ struct DiTGenerationOutput {
 
   // seed used for image generation.
   int64_t seed;
+
+  // number of video frames
+  int32_t num_frames = 0;
+
+  // video fps
+  double video_fps = 0.0;
 };
 
 struct DiTRequestOutput {

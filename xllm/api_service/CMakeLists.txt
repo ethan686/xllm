@@ -16,6 +16,7 @@ cc_library(
     sample_service_impl.h
     embedding_service_impl.h
     image_generation_service_impl.h
+    video_generation_service_impl.h
     rerank_service_impl.h
     qwen3_rerank_service_impl.h
     non_stream_call.h
@@ -37,6 +38,7 @@ cc_library(
     sample_service_impl.cpp
     embedding_service_impl.cpp
     image_generation_service_impl.cpp
+    video_generation_service_impl.cpp
     models_service_impl.cpp
     rerank_service_impl.cpp
     stream_output_parser.cpp

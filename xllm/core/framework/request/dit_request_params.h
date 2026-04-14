@@ -12,11 +12,15 @@
 #include "image_generation.pb.h"
 #include "request.h"
 #include "tensor.pb.h"
+#include "video_generation.pb.h"
 namespace xllm {
 
 struct DiTRequestParams {
   DiTRequestParams() = default;
   DiTRequestParams(const proto::ImageGenerationRequest& request,
+                   const std::string& x_rid,
+                   const std::string& x_rtime);
+  DiTRequestParams(const proto::VideoGenerationRequest& request,
                    const std::string& x_rid,
                    const std::string& x_rtime);
 
