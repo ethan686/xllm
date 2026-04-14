@@ -1448,15 +1448,15 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    auto pe_dict = state_dict.get_dict_with_prefix("patch_embedding.");
-    auto pe_weight = pe_dict.get_tensor("weight");
-    if (pe_weight.defined()) {
-      patch_embedding_->weight.data().copy_(pe_weight);
-    }
-    auto pe_bias = pe_dict.get_tensor("bias");
-    if (pe_bias.defined() && patch_embedding_->bias.defined()) {
-      patch_embedding_->bias.data().copy_(pe_bias);
-    }
+    weight::load_weight(state_dict,
+                        "patch_embedding.weight",
+                        patch_embedding_->weight,
+                        pad_embedding_weight_loaded_);
+    weight::load_weight(state_dict,
+                        "patch_embedding.bias",
+                        patch_embedding_->bias,
+                        pad_embedding_bias_loaded_);
+
     condition_embedder_->load_state_dict(
         state_dict.get_dict_with_prefix("condition_embedder."));
     for (int64_t i = 0; i < transformer_layers_.size(); ++i) {
@@ -1472,6 +1472,11 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
 
   void verify_loaded_weights(const std::string& prefix) const {
     // patch_embedding weights checked via scale_shift_table below
+    CHECK(pad_embedding_weight_loaded_) << "patch_embedding is not loaded for"
+                                        << prefix << "pad_embedding.weight";
+    CHECK(pad_embedding_bias_loaded_) << "patch_embedding is not loaded for"
+                                      << prefix << "pad_embedding.bias";
+
     condition_embedder_->verify_loaded_weights(prefix + "condition_embedder.");
     for (size_t i = 0; i < transformer_layers_.size(); ++i) {
       transformer_layers_[i]->verify_loaded_weights(prefix + "blocks." +
@@ -1521,6 +1526,8 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
   layer::AddMatmul proj_out_{nullptr};
   torch::Tensor scale_shift_table_;
   bool scale_shift_table_loaded_{false};
+  bool pad_embedding_weight_loaded_{false};
+  bool pad_embedding_bias_loaded_{false};
   torch::TensorOptions options_;
 };
 TORCH_MODULE(WanTransformer3DModel);
