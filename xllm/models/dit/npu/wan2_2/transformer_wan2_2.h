@@ -1280,12 +1280,11 @@ class WanTransformerBlockImpl : public torch::nn::Module {
 };
 TORCH_MODULE(WanTransformerBlock);
 
-class Wan2_2TransformerImpl : public torch::nn::Module {
+class WanTransformer3DModelImpl : public torch::nn::Module {
  public:
-  explicit Wan2_2TransformerImpl(const ModelContext& context)
+  explicit WanTransformer3DModelImpl(const ModelContext& context)
       : options_(context.get_tensor_options()) {
-    LOG(INFO) << "Wan2_2TransformerImpl Init";
-
+    LOG(INFO) << "WanTransformer3DModelImpl Init";
     auto model_args = context.get_model_args();
     auto parallel_args = context.get_parallel_args();
     patch_size_ = model_args.wan_patch_size();
@@ -1309,9 +1308,6 @@ class Wan2_2TransformerImpl : public torch::nn::Module {
       out_channels_ = in_channels_;
     }
     rope_ = register_module("rope", WanRotaryPosEmbed(context));
-    LOG(INFO) << "Wan2_2TransformerImpl inner_dim_ " << inner_dim_;
-    LOG(INFO) << "wan 22 n_heads" << num_attention_heads_;
-    LOG(INFO) << "wan22 heads dim" << attention_head_dim_;
     patch_embedding_ = register_module(
         "patch_embedding",
         torch::nn::Conv3d(
@@ -1322,15 +1318,16 @@ class Wan2_2TransformerImpl : public torch::nn::Module {
                 .stride({patch_size_[0], patch_size_[1], patch_size_[2]})
                 .padding(0)));
 
-    LOG(INFO) << "Wan2_2TransformerImpl patch_embedding_";
-
     patch_embedding_->to(options_.dtype().toScalarType());
     condition_embedder_ = register_module("condition_embedder",
                                           WanTimeTextImageEmbedding(context));
 
     blocks_ = register_module("blocks", torch::nn::ModuleList());
+    transformer_layers_.reserve(num_layers_);
     for (int64_t i = 0; i < num_layers_; ++i) {
-      blocks_->push_back(WanTransformerBlock(context, parallel_args));
+      auto block = WanTransformerBlock(context, parallel_args);
+      blocks_->push_back(block);
+      transformer_layers_.push_back(block);
     }
 
     norm_out_ =
@@ -1401,6 +1398,14 @@ class Wan2_2TransformerImpl : public torch::nn::Module {
                      1);
     }
 
+    for (int64_t i = 0; i < transformer_layers_.size(); ++i) {
+      hidden_states =
+          transformer_layers_[i]->forward(hidden_states,
+                                          encoder_hidden_states_embedded,
+                                          timestep_proj,
+                                          rotary_emb);
+    }
+
     torch::Tensor shift, scale;
     if (temb.dim() == 3) {
       auto scale_shift =
@@ -1443,7 +1448,6 @@ class Wan2_2TransformerImpl : public torch::nn::Module {
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    // Load patch_embedding (Conv3d) weights manually
     auto pe_dict = state_dict.get_dict_with_prefix("patch_embedding.");
     auto pe_weight = pe_dict.get_tensor("weight");
     if (pe_weight.defined()) {
@@ -1455,10 +1459,8 @@ class Wan2_2TransformerImpl : public torch::nn::Module {
     }
     condition_embedder_->load_state_dict(
         state_dict.get_dict_with_prefix("condition_embedder."));
-    for (int64_t i = 0; i < blocks_->size(); ++i) {
-      auto block =
-          std::dynamic_pointer_cast<WanTransformerBlockImpl>(blocks_[i]);
-      block->load_state_dict(
+    for (int64_t i = 0; i < transformer_layers_.size(); ++i) {
+      transformer_layers_[i]->load_state_dict(
           state_dict.get_dict_with_prefix("blocks." + std::to_string(i) + "."));
     }
     proj_out_->load_state_dict(state_dict.get_dict_with_prefix("proj_out."));
@@ -1471,11 +1473,9 @@ class Wan2_2TransformerImpl : public torch::nn::Module {
   void verify_loaded_weights(const std::string& prefix) const {
     // patch_embedding weights checked via scale_shift_table below
     condition_embedder_->verify_loaded_weights(prefix + "condition_embedder.");
-    for (size_t i = 0; i < blocks_->size(); ++i) {
-      auto block = std::dynamic_pointer_cast<WanTransformerBlockImpl>(
-          blocks_->operator[](i));
-      block->verify_loaded_weights(prefix + "blocks." + std::to_string(i) +
-                                   ".");
+    for (size_t i = 0; i < transformer_layers_.size(); ++i) {
+      transformer_layers_[i]->verify_loaded_weights(prefix + "blocks." +
+                                                    std::to_string(i) + ".");
     }
     proj_out_->verify_loaded_weights(prefix + "proj_out.");
     CHECK(scale_shift_table_loaded_) << "scale_shift_table is not loaded for "
@@ -1516,21 +1516,21 @@ class Wan2_2TransformerImpl : public torch::nn::Module {
   WanTimeTextImageEmbedding condition_embedder_{nullptr};
   WanRotaryPosEmbed rope_{nullptr};
   torch::nn::ModuleList blocks_;
+  std::vector<WanTransformerBlock> transformer_layers_;
   FP32LayerNorm norm_out_{nullptr};
   layer::AddMatmul proj_out_{nullptr};
   torch::Tensor scale_shift_table_;
   bool scale_shift_table_loaded_{false};
-
   torch::TensorOptions options_;
 };
-TORCH_MODULE(Wan2_2Transformer);
+TORCH_MODULE(WanTransformer3DModel);
 
-class WanTransformer3DModelImpl : public torch::nn::Module {
+class Wan22DiTModelImpl : public torch::nn::Module {
  public:
-  explicit WanTransformer3DModelImpl(const ModelContext& context)
+  explicit Wan22DiTModelImpl(const ModelContext& context)
       : options_(context.get_tensor_options()) {
     wan2_2_transformer_ =
-        register_module("wan2_2_transformer", Wan2_2Transformer(context));
+        register_module("wan2_2_transformer", WanTransformer3DModel(context));
   }
   torch::Tensor forward(
       const torch::Tensor& hidden_states,
@@ -1555,11 +1555,10 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
   }
 
  private:
-  Wan2_2Transformer wan2_2_transformer_{nullptr};
+  WanTransformer3DModel wan2_2_transformer_{nullptr};
   torch::TensorOptions options_;
-  int64_t num_attention_heads_;
 };
-TORCH_MODULE(WanTransformer3DModel);
+TORCH_MODULE(Wan22DiTModel);
 
 REGISTER_MODEL_ARGS(WanTransformer3DModel, [&] {
   LOAD_ARG_OR(dtype, "dtype", "bfloat16");

@@ -49,10 +49,8 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
 
     LOG(INFO) << "Initializing Wan2_2I2V pipeline...";
     vae_ = AutoencoderKLWan(context.get_model_context("vae"));
-    transformer_ =
-        WanTransformer3DModel(context.get_model_context("transformer"));
-    transformer_2_ =
-        WanTransformer3DModel(context.get_model_context("transformer_2"));
+    transformer_ = Wan22DiTModel(context.get_model_context("transformer"));
+    transformer_2_ = Wan22DiTModel(context.get_model_context("transformer_2"));
     umt5_ = UMT5EncoderModel(context.get_model_context("text_encoder"));
     scheduler_ =
         UniPCMultistepScheduler(context.get_model_context("scheduler"));
@@ -496,7 +494,7 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
     for (int64_t i = 0; i < timesteps.numel(); ++i) {
       torch::Tensor t = timesteps[i];
 
-      WanTransformer3DModel current_model = nullptr;
+      Wan22DiTModel current_model = nullptr;
       float current_guidance;
 
       if (boundary_timestep < 0 || t.item<float>() >= boundary_timestep) {
@@ -592,8 +590,8 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
  private:
   UniPCMultistepScheduler scheduler_{nullptr};
   AutoencoderKLWan vae_{nullptr};
-  WanTransformer3DModel transformer_{nullptr};
-  WanTransformer3DModel transformer_2_{nullptr};
+  Wan22DiTModel transformer_{nullptr};
+  Wan22DiTModel transformer_2_{nullptr};
   UMT5EncoderModel umt5_{nullptr};
   std::unique_ptr<Tokenizer> tokenizer_{nullptr};
   VideoProcessor video_processor_{nullptr};
