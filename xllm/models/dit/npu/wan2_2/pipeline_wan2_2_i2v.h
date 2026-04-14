@@ -581,7 +581,9 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
                   .to(prepared_latents.device(), prepared_latents.dtype());
 
     prepared_latents = prepared_latents / latents_std + latents_mean;
+    LOG(INFO) << "________________________开始decode_________________________";
     video = vae_->decode(prepared_latents).sample;
+    LOG(INFO) << "________________________结束decode_________________________";
     video = video_processor_->postprocess_video(video);
 
     return video;
