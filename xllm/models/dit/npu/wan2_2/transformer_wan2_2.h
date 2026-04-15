@@ -65,14 +65,18 @@ inline torch::Tensor wan_apply_rotary_emb(const torch::Tensor& hidden_states,
 
 class FP32LayerNormImpl : public torch::nn::Module {
  public:
-  FP32LayerNormImpl(int64_t normalized_shape,
+  FP32LayerNormImpl(const ModelContext& context,
+                    int64_t normalized_shape,
                     double eps = 1e-6,
                     bool elementwise_affine = true)
-      : normalized_shape_(normalized_shape),
+      : options_(context.get_tensor_options()),
+        normalized_shape_(normalized_shape),
         eps_(eps),
         elementwise_affine_(elementwise_affine) {
-    weight_ = torch::ones({normalized_shape}, torch::kFloat32);
-    bias_ = torch::zeros({normalized_shape}, torch::kFloat32);
+    weight_ =
+        torch::ones({normalized_shape}, torch::kFloat32).to(options_.device());
+    bias_ =
+        torch::zeros({normalized_shape}, torch::kFloat32).to(options_.device());
     if (elementwise_affine) {
       weight_ = register_parameter("weight", weight_);
       bias_ = register_parameter("bias", bias_);
@@ -81,8 +85,17 @@ class FP32LayerNormImpl : public torch::nn::Module {
 
   torch::Tensor forward(const torch::Tensor& x) {
     auto origin_dtype = x.dtype();
-    return torch::layer_norm(
-               x.to(torch::kFloat32), {normalized_shape_}, weight_, bias_, eps_)
+    LOG(INFO) << "x张量的设备是：" << x.device();
+    LOG(INFO) << "weight张量的设备是：" << weight_.device();
+    LOG(INFO) << "bias张量的设备是：" << bias_.device();
+    LOG(INFO) << "weight张量的数据类型是：" << weight_.dtype();
+    LOG(INFO) << "bias张量的数据类型是：" << bias_.dtype();
+
+    return torch::layer_norm(x.to(torch::kFloat32),
+                             {normalized_shape_},
+                             weight_.to(torch::kFloat32),
+                             bias_.to(torch::kFloat32),
+                             eps_)
         .to(origin_dtype);
   }
 
@@ -90,6 +103,8 @@ class FP32LayerNormImpl : public torch::nn::Module {
     if (elementwise_affine_) {
       weight::load_weight(state_dict, "weight", weight_, weight_is_loaded_);
       weight::load_weight(state_dict, "bias", bias_, bias_is_loaded_);
+      LOG(INFO) << "weight张量的数据类型是：" << weight_.dtype();
+      LOG(INFO) << "bias张量的数据类型是：" << bias_.dtype();
     }
   }
 
@@ -790,7 +805,8 @@ class WanImageEmbeddingImpl : public torch::nn::Module {
     out_features_ = model_args.head_dim() * model_args.n_heads();
     pos_embed_seq_len_ = model_args.pos_embed_seq_len();
 
-    norm1_ = register_module("norm1", FP32LayerNorm(in_features_, 1e-6));
+    norm1_ =
+        register_module("norm1", FP32LayerNorm(context, in_features_, 1e-6));
     ff_ = register_module("ff",
                           WanFeedForward(context,
                                          parallel_args,
@@ -802,7 +818,8 @@ class WanImageEmbeddingImpl : public torch::nn::Module {
                                          false,
                                          -1,
                                          true));
-    norm2_ = register_module("norm2", FP32LayerNorm(out_features_, 1e-6));
+    norm2_ =
+        register_module("norm2", FP32LayerNorm(context, out_features_, 1e-6));
 
     if (pos_embed_seq_len_ > 0) {
       pos_embed_ = register_parameter(
@@ -1083,12 +1100,14 @@ class WanTransformerBlockImpl : public torch::nn::Module {
     cross_attn_norm_ = model_args.cross_attn_norm();
     qk_norm_ = model_args.qk_norm();
 
-    norm1_ = register_module("norm1", FP32LayerNorm(dim_, eps_, false));
+    norm1_ =
+        register_module("norm1", FP32LayerNorm(context, dim_, eps_, false));
     attn1_ = register_module("attn1", WanAttention(context, parallel_args));
     attn2_ = register_module(
         "attn2", WanAttention(context, parallel_args, dim_ / num_heads_));
     if (cross_attn_norm_) {
-      norm2_ = register_module("norm2", FP32LayerNorm(dim_, eps_, true));
+      norm2_ =
+          register_module("norm2", FP32LayerNorm(context, dim_, eps_, true));
     }
     ff_ = register_module("ff",
                           WanFeedForward(context,
@@ -1101,7 +1120,8 @@ class WanTransformerBlockImpl : public torch::nn::Module {
                                          false,
                                          ffn_dim_,
                                          true));
-    norm3_ = register_module("norm3", FP32LayerNorm(dim_, eps_, false));
+    norm3_ =
+        register_module("norm3", FP32LayerNorm(context, dim_, eps_, false));
     scale_shift_table_ =
         register_parameter("scale_shift_table",
                            torch::randn({1, 6, dim_}, options_) /
@@ -1155,8 +1175,7 @@ class WanTransformerBlockImpl : public torch::nn::Module {
 
     if (cross_attn_norm_) {
       LOG(INFO) << "______________TransformerBlock5________________________";
-      norm_hidden_states = norm2_->forward(hidden_states.to(torch::kFloat32))
-                               .to(hidden_states.dtype());
+      norm_hidden_states = norm2_->forward(hidden_states);
       LOG(INFO) << "______________TransformerBlock6________________________";
     } else {
       norm_hidden_states = hidden_states;
@@ -1280,8 +1299,8 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
       transformer_layers_.push_back(block);
     }
 
-    norm_out_ =
-        register_module("norm_out", FP32LayerNorm(inner_dim_, 1e-6, false));
+    norm_out_ = register_module(
+        "norm_out", FP32LayerNorm(context, inner_dim_, 1e-6, false));
     int64_t patch_prod = patch_size_[0] * patch_size_[1] * patch_size_[2];
     proj_out_ = register_module(
         "proj_out",
