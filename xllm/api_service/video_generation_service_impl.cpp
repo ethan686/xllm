@@ -41,13 +41,13 @@ bool send_result_to_client_brpc(std::shared_ptr<VideoGenerationCall> call,
   const std::vector<DiTGenerationOutput>& outputs = req_output.outputs;
   proto_output->mutable_results()->Reserve(outputs.size());
 
-  std::string encoded;
+  std::string video;
   for (const auto& output : outputs) {
     auto* proto_result = proto_output->add_results();
 
-    encoded.clear();
-    butil::Base64Encode(output.image, &encoded);
-    proto_result->set_video(encoded);
+    video.clear();
+    butil::Base64Encode(output.data, &video);
+    proto_result->set_video(video);
 
     proto_result->set_width(output.width);
     proto_result->set_height(output.height);

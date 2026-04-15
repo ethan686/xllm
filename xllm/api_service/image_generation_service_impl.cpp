@@ -49,7 +49,7 @@ bool send_result_to_client_brpc(std::shared_ptr<ImageGenerationCall> call,
     auto* proto_result = proto_output->add_results();
 
     image.clear();
-    butil::Base64Encode(output.image, &image);
+    butil::Base64Encode(output.data, &image);
 
     proto_result->set_image(image);
     proto_result->set_width(output.width);

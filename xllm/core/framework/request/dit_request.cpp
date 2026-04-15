@@ -77,12 +77,12 @@ const DiTRequestOutput DiTRequest::generate_output() {
         output_.tensors[idx].squeeze(0).cpu().to(torch::kFloat32).contiguous();
     if (tensor.dim() == 4 || state_.generation_params().force_video_output) {
       vid_encoder.encode(
-          tensor, state_.generation_params().video_fps, "mp4", result.image);
+          tensor, state_.generation_params().video_fps, "mp4", result.data);
       result.num_frames =
           tensor.dim() >= 1 ? static_cast<int32_t>(tensor.size(0)) : 0;
       result.video_fps = state_.generation_params().video_fps;
     } else {
-      img_encoder.encode(tensor, result.image);
+      img_encoder.encode(tensor, result.data);
     }
     output.outputs.push_back(result);
   }
