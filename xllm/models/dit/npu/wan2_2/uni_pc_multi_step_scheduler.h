@@ -160,9 +160,13 @@ class UniPCMultistepSchedulerImpl : public torch::nn::Module {
     // use_exponential_sigmas, use_karras_sigmas are not implemented
     if (use_flow_sigmas_) {
       if (!sigmas.has_value()) {
-        std::vector<float> s_vec(num_steps);
-        for (int i = 0; i < num_steps; ++i) {
-          s_vec[i] = 1.0f - static_cast<float>(i) / num_steps;
+        float start = 1.0f;
+        float stop = 1.0f / static_cast<float>(num_train_timesteps_);
+        int N = num_steps;
+        std::vector<float> s_vec(N);
+        for (int i = 0; i < N; ++i) {
+          s_vec[i] = start + static_cast<float>(i) / static_cast<float>(N) *
+                                 (stop - start);
         }
         sigmas_tensor =
             torch::from_blob(s_vec.data(), {num_steps}, torch::kFloat32)
