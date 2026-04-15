@@ -66,6 +66,8 @@ DiTForwardInput DiTBatch::prepare_forward_input() {
   std::vector<torch::Tensor> control_images;
   std::vector<torch::Tensor> latents;
   std::vector<torch::Tensor> masked_image_latents;
+  std::vector<torch::Tensor> last_images;
+  std::vector<torch::Tensor> image_embeds;
   const auto batch_size = request_vec_.size();
   prompt_embeds.reserve(batch_size);
   pooled_prompt_embeds.reserve(batch_size);
@@ -76,6 +78,8 @@ DiTForwardInput DiTBatch::prepare_forward_input() {
   control_images.reserve(batch_size);
   latents.reserve(batch_size);
   masked_image_latents.reserve(batch_size);
+  last_images.reserve(batch_size);
+  image_embeds.reserve(batch_size);
   for (const auto& request : request_vec_) {
     const auto& generation_params = request->state().generation_params();
     if (input.generation_params != generation_params) {
@@ -109,6 +113,8 @@ DiTForwardInput DiTBatch::prepare_forward_input() {
     mask_images.emplace_back(input_params.mask_image);
     condition_images.emplace_back(input_params.condition_image);
     control_images.emplace_back(input_params.control_image);
+    last_images.emplace_back(input_params.last_image);
+    image_embeds.emplace_back(input_params.image_embeds);
   }
 
   if (input.prompts.size() != request_vec_.size()) {
@@ -166,6 +172,14 @@ DiTForwardInput DiTBatch::prepare_forward_input() {
 
   if (check_tensors_valid(masked_image_latents)) {
     input.masked_image_latents = torch::stack(masked_image_latents);
+  }
+
+  if (check_tensors_valid(last_images)) {
+    input.last_images = torch::stack(last_images);
+  }
+
+  if (check_tensors_valid(image_embeds)) {
+    input.image_embeds = torch::stack(image_embeds);
   }
   return input;
 }

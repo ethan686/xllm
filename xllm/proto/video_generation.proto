@@ -11,38 +11,23 @@ message VideoInput {
   // Primary input text description for video generation
   string prompt = 1;
 
-  // Secondary prompt for additional details
-  optional string prompt_2 = 2;
-
   // Negative prompt to exclude unwanted features
-  optional string negative_prompt = 3;
-
-  // Secondary negative prompt
-  optional string negative_prompt_2 = 4;
+  optional string negative_prompt = 2;
 
   // prompt embedding
-  optional Tensor prompt_embed = 5;
-
-  // pooled prompt embeddings
-  optional Tensor pooled_prompt_embed = 6;
+  optional Tensor prompt_embed = 3;
 
   // negative prompt embedding
-  optional Tensor negative_prompt_embed = 7;
-
-  // pooled negative prompt embedding
-  optional Tensor negative_pooled_prompt_embed = 8;
+  optional Tensor negative_prompt_embed = 4;
 
   // Input image for image-to-video generation (base64 encoded)
-  optional string image = 10;
+  optional string image = 5;
 
-  // Input video for video-to-video generation (base64 encoded)
-  optional string video = 11;
+  // Last image (base64 encoded)
+  optional string last_image = 6;
 
-  // Control image (base64 encoded)
-  optional string control_image = 13;
-
-  // Condition image (base64 encoded)
-  optional string condition_image = 14;
+  // Image embeddings for image-to-video generation
+  optional Tensor image_embeds = 7;
 }
 
 // Generation parameters container
@@ -53,11 +38,11 @@ message VideoParameters {
   // Number of inference steps for video generation
   optional int32 num_inference_steps = 2;
 
-  // True CFG scale value
-  optional float true_cfg_scale = 3;
-
   // Guidance scale value for prompt adherence
-  optional float guidance_scale = 4;
+  optional float guidance_scale = 3;
+
+  // Guidance scale value for negative prompt adherence
+  optional float guidence_scale_2 = 4;  
 
   // Number of videos to generate per prompt
   optional int32 num_videos_per_prompt = 5;
@@ -68,20 +53,23 @@ message VideoParameters {
   // Maximum sequence length for prompt processing
   optional int32 max_sequence_length = 7;
 
-  // The extent to which the reference image is altered (0-1)
-  optional float strength = 8;
-
   // Number of frames to generate
-  optional int32 num_frames = 9;
+  optional int32 num_frames = 8;
 
   // Output video FPS (frames per second)
-  optional double fps = 10;
+  optional double fps = 9;
 
-  // Enable CFG renormalization
-  optional bool enable_cfg_renorm = 11;
+  // video duration
+  optional int32 seconds = 10;
 
-  // Minimum value for CFG renorm scale
-  optional float cfg_renorm_min = 12;
+  // high-low noise separation ratio
+  optional float boundary_ratio = 11;
+
+  // scheduler flow shif
+  optional float flow_shift = 12;
+
+  // True CFG scale value for balancing generation
+  optional float true_cfg_scale = 13;
 }
 
 // Request structure for video generation

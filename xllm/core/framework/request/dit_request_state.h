@@ -46,7 +46,11 @@ struct DiTGenerationParams {
            cfg_renorm_min == other.cfg_renorm_min &&
            num_frames == other.num_frames &&
            force_video_output == other.force_video_output &&
-           video_fps == other.video_fps;
+           video_fps == other.video_fps &&
+           guidance_scale_2 == other.guidance_scale_2 &&
+           seconds == other.seconds && boundary_ratio == other.boundary_ratio &&
+           flow_shift == other.flow_shift &&
+           num_videos_per_prompt == other.num_videos_per_prompt;
   }
 
   bool operator!=(const DiTGenerationParams& other) const {
@@ -80,6 +84,16 @@ struct DiTGenerationParams {
   bool force_video_output = false;
 
   double video_fps = 8.0;
+
+  float guidance_scale_2 = 1.0;
+
+  int32_t seconds = 5;
+
+  float boundary_ratio = 0.9f;
+
+  float flow_shift = 1.0f;
+
+  uint32_t num_videos_per_prompt = 1;
 };
 
 struct DiTInputParams {
@@ -114,6 +128,12 @@ struct DiTInputParams {
   torch::Tensor mask_image;
 
   torch::Tensor masked_image_latent;
+
+  // Last image for video generation (base64 decoded)
+  torch::Tensor last_image;
+
+  // Image embeddings for video generation
+  torch::Tensor image_embeds;
 };
 
 struct DiTRequestState {

@@ -219,6 +219,8 @@ message DiTForwardInput {
   Tensor negative_prompt_embeds = 13;
   Tensor negative_pooled_prompt_embeds = 14;
   Tensor latents = 15;
+  Tensor last_images = 17;
+  Tensor image_embeds = 18;
   
   // generation params
   DiTGenerationParams generation_params = 16;
@@ -241,6 +243,13 @@ message DiTGenerationParams {
   bool enable_cfg_renorm = 10;
   float cfg_renorm_min = 11;
   int32 num_frames = 12;
+  bool force_video_output = 13;
+  double video_fps = 14;
+  float guidance_scale_2 = 15;
+  int32 seconds = 16;
+  float boundary_ratio = 17;
+  float flow_shift = 18;
+  uint32 num_videos_per_prompt = 19;
 }
 
 message ForwardInput {

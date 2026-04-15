@@ -29,7 +29,8 @@ namespace xllm {
 struct DiTForwardInput {
   bool valid() const {
     return prompts.size() > 0 || prompt_embeds.defined() ||
-           pooled_prompt_embeds.defined() || images.defined();
+           pooled_prompt_embeds.defined() || images.defined() ||
+           last_images.defined() || image_embeds.defined();
   }
 
   void save_with_prefix(std::string prefix) const {
@@ -145,6 +146,20 @@ struct DiTForwardInput {
       os << "undefined" << std::endl;
     }
 
+    os << "last_images: ";
+    if (last_images.defined()) {
+      os << last_images.sizes() << std::endl;
+    } else {
+      os << "undefined" << std::endl;
+    }
+
+    os << "image_embeds: ";
+    if (image_embeds.defined()) {
+      os << image_embeds.sizes() << std::endl;
+    } else {
+      os << "undefined" << std::endl;
+    }
+
     // Print generation_params
     os << "\n--- Generation Parameters ---" << std::endl;
     os << "width: " << generation_params.width << std::endl;
@@ -207,6 +222,13 @@ struct DiTForwardInput {
     if (control_image.defined()) {
       input.control_image = control_image.to(device, dtype);
     }
+
+    if (last_images.defined()) {
+      input.last_images = last_images.to(device, dtype);
+    }
+    if (image_embeds.defined()) {
+      input.image_embeds = image_embeds.to(device, dtype);
+    }
     return input;
   }
 
@@ -243,6 +265,12 @@ struct DiTForwardInput {
   torch::Tensor negative_pooled_prompt_embeds;
 
   torch::Tensor latents;
+
+  // Last images for video generation
+  torch::Tensor last_images;
+
+  // Image embeddings for video generation
+  torch::Tensor image_embeds;
 
   // generation params
   DiTGenerationParams generation_params;

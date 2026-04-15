@@ -76,8 +76,8 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
     auto seed = generation_params.seed > 0 ? generation_params.seed : 42;
     auto images = input.images.defined() ? std::make_optional(input.images)
                                          : std::nullopt;
-    auto last_images = input.mask_images.defined()
-                           ? std::make_optional(input.mask_images)
+    auto last_images = input.last_images.defined()
+                           ? std::make_optional(input.last_images)
                            : std::nullopt;
     auto prompts = std::make_optional(input.prompts);
     auto negative_prompts = input.negative_prompts.empty()
@@ -94,20 +94,24 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
             ? std::make_optional(input.negative_prompt_embeds)
             : std::nullopt;
 
+    auto image_embeds = input.image_embeds.defined()
+                            ? std::make_optional(input.image_embeds)
+                            : std::nullopt;
+
     auto output = forward_impl(images,
                                last_images,
                                prompts,
                                negative_prompts,
                                generation_params.height,
                                generation_params.width,
-                               /*num_frames=*/81,
+                               generation_params.num_frames,
                                generation_params.num_inference_steps,
                                generation_params.guidance_scale,
-                               /*guidance_scale_2=*/-1.0f,
-                               (int64_t)generation_params.num_images_per_prompt,
+                               generation_params.guidance_scale_2,
+                               generation_params.num_videos_per_prompt,
                                seed,
                                latents,
-                               /*image_embeds=*/std::nullopt,
+                               image_embeds,
                                prompt_embeds,
                                negative_prompt_embeds,
                                generation_params.max_sequence_length);

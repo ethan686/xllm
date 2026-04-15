@@ -55,10 +55,8 @@ bool decodeBase64Image(const std::string& base64, torch::Tensor& out) {
   return true;
 }
 
-// Shared helper: populate DiTInputParams from an image-like input proto.
-// Both ImageInput and VideoInput have the same prompt/embed/image fields.
-template <typename InputProto>
-void fillInputParams(DiTInputParams& input_params, const InputProto& input) {
+void fillImageInputParams(DiTInputParams& input_params,
+                          const proto::Input& input) {
   input_params.prompt = input.prompt();
   if (input.has_prompt_2()) {
     input_params.prompt_2 = input.prompt_2();
@@ -84,17 +82,15 @@ void fillInputParams(DiTInputParams& input_params, const InputProto& input) {
     input_params.negative_pooled_prompt_embed =
         util::proto_to_torch(input.negative_pooled_prompt_embed());
   }
-  if constexpr (std::is_same_v<InputProto, proto::Input>) {
-    if (input.has_latent()) {
-      input_params.latent = util::proto_to_torch(input.latent());
-    }
-    if (input.has_masked_image_latent()) {
-      input_params.masked_image_latent =
-          util::proto_to_torch(input.masked_image_latent());
-    }
-    if (input.has_mask_image()) {
-      decodeBase64Image(input.mask_image(), input_params.mask_image);
-    }
+  if (input.has_latent()) {
+    input_params.latent = util::proto_to_torch(input.latent());
+  }
+  if (input.has_masked_image_latent()) {
+    input_params.masked_image_latent =
+        util::proto_to_torch(input.masked_image_latent());
+  }
+  if (input.has_mask_image()) {
+    decodeBase64Image(input.mask_image(), input_params.mask_image);
   }
   if (input.has_image()) {
     decodeBase64Image(input.image(), input_params.image);
@@ -107,11 +103,32 @@ void fillInputParams(DiTInputParams& input_params, const InputProto& input) {
   }
 }
 
-// Shared helper: populate generation params from a parameters proto.
-// Both ImageParameters and VideoParameters share most fields.
-template <typename ParamsProto>
-void fillGenerationParams(DiTGenerationParams& generation_params,
-                          const ParamsProto& params) {
+void fillVideoInputParams(DiTInputParams& input_params,
+                          const proto::VideoInput& input) {
+  input_params.prompt = input.prompt();
+  if (input.has_negative_prompt()) {
+    input_params.negative_prompt = input.negative_prompt();
+  }
+  if (input.has_prompt_embed()) {
+    input_params.prompt_embed = util::proto_to_torch(input.prompt_embed());
+  }
+  if (input.has_negative_prompt_embed()) {
+    input_params.negative_prompt_embed =
+        util::proto_to_torch(input.negative_prompt_embed());
+  }
+  if (input.has_image()) {
+    decodeBase64Image(input.image(), input_params.image);
+  }
+  if (input.has_last_image()) {
+    decodeBase64Image(input.last_image(), input_params.last_image);
+  }
+  if (input.has_image_embeds()) {
+    input_params.image_embeds = util::proto_to_torch(input.image_embeds());
+  }
+}
+
+void fillImageGenerationParams(DiTGenerationParams& generation_params,
+                               const proto::Parameters& params) {
   if (params.has_size()) {
     auto [w, h] = splitResolution(params.size());
     generation_params.width = w;
@@ -125,6 +142,10 @@ void fillGenerationParams(DiTGenerationParams& generation_params,
   }
   if (params.has_guidance_scale()) {
     generation_params.guidance_scale = params.guidance_scale();
+  }
+  if (params.has_num_images_per_prompt()) {
+    generation_params.num_images_per_prompt =
+        static_cast<uint32_t>(params.num_images_per_prompt());
   }
   if (params.has_seed()) {
     generation_params.seed = params.seed();
@@ -140,11 +161,54 @@ void fillGenerationParams(DiTGenerationParams& generation_params,
   }
 }
 
+void fillVideoGenerationParams(DiTGenerationParams& generation_params,
+                               const proto::VideoParameters& params) {
+  if (params.has_size()) {
+    auto [w, h] = splitResolution(params.size());
+    generation_params.width = w;
+    generation_params.height = h;
+  }
+  if (params.has_num_inference_steps()) {
+    generation_params.num_inference_steps = params.num_inference_steps();
+  }
+  if (params.has_guidance_scale()) {
+    generation_params.guidance_scale = params.guidance_scale();
+  }
+  if (params.has_true_cfg_scale()) {
+    generation_params.true_cfg_scale = params.true_cfg_scale();
+  }
+  if (params.has_guidence_scale_2()) {
+    generation_params.guidance_scale_2 = params.guidence_scale_2();
+  }
+  if (params.has_num_videos_per_prompt()) {
+    generation_params.num_videos_per_prompt =
+        static_cast<uint32_t>(params.num_videos_per_prompt());
+  }
+  if (params.has_seed()) {
+    generation_params.seed = params.seed();
+  }
+  if (params.has_max_sequence_length()) {
+    generation_params.max_sequence_length = params.max_sequence_length();
+  }
+  if (params.has_num_frames()) {
+    generation_params.num_frames = params.num_frames();
+  }
+  if (params.has_fps()) {
+    generation_params.video_fps = params.fps();
+  }
+  if (params.has_seconds()) {
+    generation_params.seconds = params.seconds();
+  }
+  if (params.has_boundary_ratio()) {
+    generation_params.boundary_ratio = params.boundary_ratio();
+  }
+  if (params.has_flow_shift()) {
+    generation_params.flow_shift = params.flow_shift();
+  }
+}
+
 }  // namespace
 
-// ---------------------------------------------------------------------------
-// Image generation constructor
-// ---------------------------------------------------------------------------
 DiTRequestParams::DiTRequestParams(const proto::ImageGenerationRequest& request,
                                    const std::string& x_rid,
                                    const std::string& x_rtime) {
@@ -155,23 +219,14 @@ DiTRequestParams::DiTRequestParams(const proto::ImageGenerationRequest& request,
   model = request.model();
 
   if (request.has_input()) {
-    fillInputParams(input_params, request.input());
+    fillImageInputParams(input_params, request.input());
   }
 
-  generation_params.num_images_per_prompt = 1;
   if (request.has_parameters()) {
-    const auto& params = request.parameters();
-    fillGenerationParams(generation_params, params);
-    if (params.has_num_images_per_prompt()) {
-      generation_params.num_images_per_prompt =
-          static_cast<uint32_t>(params.num_images_per_prompt());
-    }
+    fillImageGenerationParams(generation_params, request.parameters());
   }
 }
 
-// ---------------------------------------------------------------------------
-// Video generation constructor
-// ---------------------------------------------------------------------------
 DiTRequestParams::DiTRequestParams(const proto::VideoGenerationRequest& request,
                                    const std::string& x_rid,
                                    const std::string& x_rtime) {
@@ -184,23 +239,11 @@ DiTRequestParams::DiTRequestParams(const proto::VideoGenerationRequest& request,
   generation_params.force_video_output = true;
 
   if (request.has_input()) {
-    fillInputParams(input_params, request.input());
+    fillVideoInputParams(input_params, request.input());
   }
 
-  generation_params.num_images_per_prompt = 1;
   if (request.has_parameters()) {
-    const auto& params = request.parameters();
-    fillGenerationParams(generation_params, params);
-    if (params.has_num_videos_per_prompt()) {
-      generation_params.num_images_per_prompt =
-          static_cast<uint32_t>(params.num_videos_per_prompt());
-    }
-    if (params.has_num_frames()) {
-      generation_params.num_frames = params.num_frames();
-    }
-    if (params.has_fps()) {
-      generation_params.video_fps = params.fps();
-    }
+    fillVideoGenerationParams(generation_params, request.parameters());
   }
 }
 
