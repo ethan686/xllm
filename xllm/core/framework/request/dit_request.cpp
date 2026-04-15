@@ -52,7 +52,8 @@ void DiTRequest::log_statistic(double total_latency) {
 }
 
 void DiTRequest::handle_forward_output(torch::Tensor output) {
-  int count = state_.generation_params().num_images_per_prompt;
+  int count = state_.generation_params().num_images_per_prompt *
+              state_.generation_params().num_videos_per_prompt;
   output_.tensors = torch::chunk(output, count);
 }
 
@@ -71,7 +72,8 @@ const DiTRequestOutput DiTRequest::generate_output() {
 
   OpenCVImageEncoder img_encoder;
   FFmpegVideoEncoder vid_encoder;
-  int count = state_.generation_params().num_images_per_prompt;
+  int count = state_.generation_params().num_images_per_prompt *
+              state_.generation_params().num_videos_per_prompt;
   for (size_t idx = 0; idx < count; ++idx) {
     torch::Tensor tensor =
         output_.tensors[idx].squeeze(0).cpu().to(torch::kFloat32).contiguous();
