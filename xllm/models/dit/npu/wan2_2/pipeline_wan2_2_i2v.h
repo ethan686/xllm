@@ -25,6 +25,7 @@ limitations under the License.
 #include "core/framework/request/dit_request_state.h"
 #include "core/framework/state_dict/state_dict.h"
 #include "core/framework/state_dict/utils.h"
+#include "framework/parallel_state/parallel_state.h"
 #include "models/model_registry.h"
 #include "transformer_wan2_2.h"
 #include "umt5_encoder.h"
@@ -35,7 +36,8 @@ namespace xllm {
 
 class Wan2_2I2VPipelineImpl : public torch::nn::Module {
  public:
-  Wan2_2I2VPipelineImpl(const DiTModelContext& context) {
+  Wan2_2I2VPipelineImpl(const DiTModelContext& context)
+      : parallel_args_(context.get_parallel_args()) {
     options_ = context.get_tensor_options();
     const auto& vae_args = context.get_model_args("vae");
     zdim_ = vae_args.z_dim();
@@ -537,23 +539,50 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
       LOG(INFO) << "________________________开始去噪___________________________"
                    "_________";
 
-      torch::Tensor noise_pred = current_model->forward(latent_model_input,
-                                                        timestep_input,
-                                                        encoded_prompt_embeds,
-                                                        torch::Tensor());
-      LOG(INFO) << "________________________结束去噪___________________________"
-                   "_________";
+      torch::Tensor noise_pred;
+      if (FLAGS_cfg_size == 2 && do_classifier_free_guidance) {
+        // CFG parallel: rank 0 runs conditional, rank 1 runs unconditional
+        auto rank = parallel_args_.dit_cfg_group_->rank();
+        if (rank == 0) {
+          noise_pred = current_model->forward(latent_model_input,
+                                              timestep_input,
+                                              encoded_prompt_embeds,
+                                              torch::Tensor());
+        } else {
+          noise_pred = current_model->forward(latent_model_input,
+                                              timestep_input,
+                                              encoded_negative_embeds,
+                                              torch::Tensor());
+        }
+        auto gathered = xllm::parallel_state::gather(
+            noise_pred, parallel_args_.dit_cfg_group_, /*dim=*/0);
+        auto chunks = torch::chunk(gathered, 2, 0);
+        auto cond_pred = chunks[0];
+        auto uncond_pred = chunks[1];
+        noise_pred = uncond_pred + torch::scalar_tensor(current_guidance,
+                                                        cond_pred.options()) *
+                                       (cond_pred - uncond_pred);
+      } else {
+        noise_pred = current_model->forward(latent_model_input,
+                                            timestep_input,
+                                            encoded_prompt_embeds,
+                                            torch::Tensor());
+        LOG(INFO)
+            << "________________________结束去噪___________________________"
+               "_________";
 
-      if (do_classifier_free_guidance) {
-        torch::Tensor noise_uncond =
-            current_model->forward(latent_model_input,
-                                   timestep_input,
-                                   encoded_negative_embeds,
-                                   torch::Tensor());
-        noise_uncond +
-            torch::scalar_tensor(current_guidance, noise_pred.options()) *
-                (noise_pred - noise_uncond);
-        noise_uncond.reset();
+        if (do_classifier_free_guidance) {
+          torch::Tensor noise_uncond =
+              current_model->forward(latent_model_input,
+                                     timestep_input,
+                                     encoded_negative_embeds,
+                                     torch::Tensor());
+          noise_pred =
+              noise_uncond +
+              torch::scalar_tensor(current_guidance, noise_pred.options()) *
+                  (noise_pred - noise_uncond);
+          noise_uncond.reset();
+        }
       }
 
       auto prev_latents = scheduler_->step(noise_pred, t, prepared_latents);
@@ -613,6 +642,7 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
   std::vector<double> latents_mean_;
   std::vector<double> latents_std_;
   torch::TensorOptions options_;
+  const ParallelArgs parallel_args_;
 };
 TORCH_MODULE(Wan2_2I2VPipeline);
 
