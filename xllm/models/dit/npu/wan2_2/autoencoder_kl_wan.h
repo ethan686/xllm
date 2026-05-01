@@ -275,8 +275,8 @@ class WanUpsampleImpl : public torch::nn::Module {
   torch::Tensor forward(const torch::Tensor& x) {
     // auto result = upsample_(x.to(torch::kFloat));
     auto result =
-        torch::nn::functional::interpolate(x.to(torch::kFloat), options_);
-    return result.to(x.dtype());
+        torch::nn::functional::interpolate(x.to(torch::kFloat32), options_);
+    return result;
   }
 
  private:
@@ -1023,7 +1023,11 @@ class WanVAEEncoder3DImpl : public torch::nn::Module {
       x = conv_in_->forward(x);
     }
     LOG(INFO) << "————————————————————VAEEncoder5————————————————————————";
+    // wsd
+    torch::save(x, "/home/weinan5/zjs/tensors_save_dir/cpp/wsd_x_conv1_cpp.pt");
 
+    LOG(INFO)
+        << "~~~~ ~~~ ~~~~ ~~~~~~~ ~~~~~~~ ~~~~~ ~~~~~~~~ ~~~~~~~~ ~~~`~ ~~~~";
     // Type-safe forward call for down_blocks_
     for (size_t i = 0; i < down_blocks_->size(); ++i) {
       if (auto res_down = down_blocks_[i]->as<WanResidualDownBlock>()) {
@@ -1038,8 +1042,14 @@ class WanVAEEncoder3DImpl : public torch::nn::Module {
                        : resample->forward(x);
       }
     }
+    // wsd
+    torch::save(
+        x, "/home/weinan5/zjs/tensors_save_dir/cpp/wsd_x_downsamlpes_cpp.pt");
 
     x = mid_block_->forward(x, feat_cache, feat_idx);
+    // wsd
+    torch::save(x,
+                "/home/weinan5/zjs/tensors_save_dir/cpp/wsd_x_middle_cpp.pt");
     x = norm_out_->forward(x);
     x = nonlinearity_(x);
     if (feat_cache) {
@@ -1070,6 +1080,8 @@ class WanVAEEncoder3DImpl : public torch::nn::Module {
     } else {
       x = conv_out_->forward(x);
     }
+    // wsd
+    torch::save(x, "/home/weinan5/zjs/tensors_save_dir/cpp/wsd_x_head_cpp.pt");
     return x;
   }
 
@@ -1585,10 +1597,10 @@ class AutoencoderKLWanImpl : public torch::nn::Module {
             args_.z_dim(), args_.z_dim(), std::vector<int64_t>{1, 1, 1}));
     init_cached_conv_count();
 
-    encoder_->to(dtype_);
-    decoder_->to(dtype_);
-    quant_conv_->to(dtype_);
-    post_quant_conv_->to(dtype_);
+    // encoder_->to(dtype_);
+    // decoder_->to(dtype_);
+    // quant_conv_->to(dtype_);
+    // post_quant_conv_->to(dtype_);
   }
 
   void enable_slicing(bool enable) { use_slicing_ = enable; }

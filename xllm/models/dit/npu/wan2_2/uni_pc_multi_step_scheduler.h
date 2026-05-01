@@ -254,10 +254,12 @@ class UniPCMultistepSchedulerImpl : public torch::nn::Module {
     begin_index_ = std::nullopt;
   }
 
-  torch::Tensor step(const torch::Tensor& model_output,
+  torch::Tensor step(const torch::Tensor& model_output_in,
                      const torch::Tensor& timestep,
-                     const torch::Tensor& sample_const) {
-    torch::Tensor sample = sample_const;
+                     const torch::Tensor& sample_in) {
+    auto input_dtype = sample_in.dtype();
+    torch::Tensor model_output = model_output_in.to(torch::kFloat32);
+    torch::Tensor sample = sample_in.to(torch::kFloat32);
     if (num_inference_steps_ <= 0) {
       LOG(FATAL)
           << "Number of inference steps is not set, run 'set_timesteps' first";
@@ -274,10 +276,18 @@ class UniPCMultistepSchedulerImpl : public torch::nn::Module {
     torch::Tensor model_output_convert =
         convert_model_output(model_output, sample);
 
+    torch::save(
+        model_output_convert,
+        "/home/weinan5/zjs/tensors_save_dir/cpp/model_output_convert_cpp.pt");
+
     if (use_corrector) {
+      LOG(INFO) << "scheduler step use_corrector";
       sample = multistep_uni_c_bh_update(
           model_output_convert, last_sample_, sample, this_order_);
     }
+    torch::save(
+        sample,
+        "/home/weinan5/zjs/tensors_save_dir/cpp/scheduler_sample_cpp.pt");
 
     for (int i = 0; i < solver_order_ - 1; ++i) {
       model_outputs_[i] = model_outputs_[i + 1];
@@ -297,9 +307,15 @@ class UniPCMultistepSchedulerImpl : public torch::nn::Module {
     this_order_ =
         std::min(this_order_calc, static_cast<int64_t>(lower_order_nums_ + 1));
 
+    LOG(INFO) << "self.this_order = " << this_order_;
+
     last_sample_ = sample;
     torch::Tensor prev_sample =
         multistep_uni_p_bh_update(model_output, sample, this_order_);
+
+    torch::save(
+        prev_sample,
+        "/home/weinan5/zjs/tensors_save_dir/cpp/scheduler_prevsample_cpp.pt");
 
     if (lower_order_nums_ < solver_order_) {
       lower_order_nums_++;
@@ -307,7 +323,7 @@ class UniPCMultistepSchedulerImpl : public torch::nn::Module {
 
     step_index_ = step_index_.value() + 1;
 
-    return prev_sample;
+    return prev_sample.to(input_dtype);
   }
 
   torch::Tensor scale_model_input(const torch::Tensor& sample) {
@@ -817,7 +833,9 @@ REGISTER_MODEL_ARGS(UniPCMultistepScheduler, [&] {
   LOAD_ARG_OR(use_exponential_sigmas, "use_exponential_sigmas", false);
   LOAD_ARG_OR(use_beta_sigmas, "use_beta_sigmas", false);
   LOAD_ARG_OR(use_flow_sigmas, "use_flow_sigmas", true);
-  LOAD_ARG_OR(flow_shift, "flow_shift", 3.0f);
+  // [FLOW_SHIFT_FIX] 默认值从 3.0 改为 5.0，匹配 Python I2V A14B 的 shift=5.0
+  // 旧代码：LOAD_ARG_OR(flow_shift, "flow_shift", 3.0f);
+  LOAD_ARG_OR(flow_shift, "flow_shift", 5.0f);
   LOAD_ARG_OR(timestep_spacing, "timestep_spacing", "linspace");
   LOAD_ARG_OR(steps_offset, "steps_offset", 0);
   LOAD_ARG_OR(final_sigmas_type, "final_sigmas_type", "zero");

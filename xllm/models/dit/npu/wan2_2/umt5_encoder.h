@@ -27,18 +27,25 @@ namespace xllm {
 // https://github.com/huggingface/transformers/tree/main/src/transformers/models/umt5
 class UMT5LayerNormImpl : public torch::nn::Module {
  public:
-  explicit UMT5LayerNormImpl(ModelContext context)
+  explicit UMT5LayerNormImpl(ModelContext context, bool is_save = false)
       : device_(context.get_tensor_options().device()),
         dtype_(context.get_tensor_options().dtype().toScalarType()) {
     ModelArgs model_args = context.get_model_args();
     int64_t hidden_size = model_args.d_model();
     variance_epsilon_ = model_args.layer_norm_eps();
+    is_save_ = is_save;
     weight_ = register_parameter(
         "weight", torch::ones({hidden_size}).to(device_).to(dtype_));
   }
 
   torch::Tensor forward(torch::Tensor hidden_states) {
-    auto variance = hidden_states.to(dtype_).pow(2).mean(-1, true);
+    if (is_save_) {
+      torch::save(
+          weight_,
+          "/home/weinan5/zjs/tensors_save_dir/cpp/rmsnorm_weight_cpp.pt");
+    }
+    auto variance = hidden_states.to(torch::kFloat32).pow(2).mean(-1, true);
+    LOG(INFO) << "zhubowei variance_epsilon_" << variance_epsilon_;
     hidden_states = hidden_states * torch::rsqrt(variance + variance_epsilon_);
     if (weight_.dtype() == torch::kFloat16 ||
         weight_.dtype() == torch::kBFloat16) {
@@ -47,7 +54,13 @@ class UMT5LayerNormImpl : public torch::nn::Module {
     return weight_ * hidden_states;
   }
 
-  void load_state_dict(const StateDict& state_dict) { LOAD_WEIGHT(weight); }
+  void load_state_dict(const StateDict& state_dict) {
+    // LOAD_WEIGHT(weight);
+    if (state_dict.has("weight")) {
+      xllm::weight::load_weight(
+          state_dict, "weight", weight_, weight_is_loaded_);
+    }
+  }
 
   void verify_loaded_weights(const std::string& prefix) const {
     CHECK(weight_is_loaded_)
@@ -60,6 +73,7 @@ class UMT5LayerNormImpl : public torch::nn::Module {
   double variance_epsilon_;
   torch::Device device_;
   torch::ScalarType dtype_;
+  bool is_save_;
 };
 TORCH_MODULE(UMT5LayerNorm);
 
@@ -325,6 +339,8 @@ class UMT5AttentionImpl : public torch::nn::Module {
                                                      torch::indexing::Slice(),
                                                      torch::indexing::Slice()});
     }
+    // LOG(INFO) << "umt5 curr_position_bias; shape" <<
+    // curr_position_bias.sizes();
     scores += curr_position_bias;
     torch::Tensor attn_weights =
         torch::softmax(scores.to(torch::kFloat), -1).to(scores.dtype());
@@ -600,33 +616,67 @@ class UMT5EncoderModelImpl : public torch::nn::Module {
       layers_.push_back(block);
     }
     final_layer_norm_ =
-        register_module("final_layer_norm", UMT5LayerNorm(context));
+        register_module("final_layer_norm", UMT5LayerNorm(context, true));
   }
 
-  torch::Tensor forward(const torch::Tensor& input_ids) {
+  torch::Tensor forward(
+      const torch::Tensor& input_ids,
+      const std::optional<torch::Tensor>& attention_mask = std::nullopt) {
     // Prepare input parameters
     auto options = torch::TensorOptions()
                        .dtype(torch::typeMetaToScalarType(input_ids.dtype()))
                        .device(input_ids.device());
 
     torch::Tensor hidden_states = embed_tokens_->forward(input_ids);
+    auto save_embed_tokens_ = hidden_states.to(torch::kCPU);
+    // torch::save(save_embed_tokens_,
+    // "/home/weinan5/zjs/tensors_save_dir/cpp/embed_token_cpp.pt");
     auto input_shape =
         hidden_states.sizes();  // (batch_size, seq_length, d_model)
     int64_t batch_size = input_shape[0];
     int64_t seq_length = input_shape[1];
-    torch::Tensor causal_mask = torch::Tensor();
-    std::vector<torch::Tensor> all_hidden_states;
-    std::vector<torch::Tensor> all_attentions;
-    torch::Tensor position_bias = torch::Tensor();
+    // torch::Tensor causal_mask = torch::Tensor();
+    // std::vector<torch::Tensor> all_hidden_states;
+    // std::vector<torch::Tensor> all_attentions;
+    // torch::Tensor position_bias = torch::Tensor();
+    torch::Tensor causal_mask;
+    if (attention_mask.has_value() && attention_mask.value().numel() > 0) {
+      causal_mask = attention_mask.value();
+    } else {
+      causal_mask =
+          (1.0 -
+           (input_ids > 0).to(options.dtype()).unsqueeze(1).unsqueeze(2)) *
+          (-1e4);
+    }
+
+    LOG(INFO) << "causal_mask shape" << causal_mask.sizes();
+    auto save_mask = causal_mask.to(torch::kCPU);
+    // torch::save(save_mask,
+    // "/home/weinan5/zjs/tensors_save_dir/cpp/prompt_mask_cpp.pt");
+
+    // causal_mask = torch::Tensor();
     for (size_t i = 0; i < layers_.size(); ++i) {
       torch::Tensor layer_head_mask = torch::Tensor();
       auto layer_outputs =
           layers_[i]->forward(hidden_states, causal_mask, layer_head_mask);
       hidden_states = layer_outputs[0];
+      if (i == 0) {
+        auto save_layer0_hiddenstate = hidden_states.to(torch::kCPU);
+        // torch::save(save_layer0_hiddenstate,
+        // "/home/weinan5/zjs/tensors_save_dir/cpp/umt5_layer0_cpp.pt");
+      }
       // position_bias = layer_outputs[1];
       layer_outputs.clear();
     }
+    auto save_before_norm = hidden_states.to(torch::kCPU);
+    // torch::save(save_before_norm,
+    // "/home/weinan5/zjs/tensors_save_dir/cpp/umt5_beforenorm_cpp.pt");
     hidden_states = final_layer_norm_->forward(hidden_states);
+
+    auto save_after_norm = hidden_states.to(torch::kCPU);
+    // torch::save(save_after_norm,
+    // "/home/weinan5/zjs/tensors_save_dir/cpp/umt5_result_cpp.pt");
+
     return hidden_states;
   }
 
@@ -646,7 +696,7 @@ class UMT5EncoderModelImpl : public torch::nn::Module {
     }
     verify_loaded_weights();
     LOG(INFO) << "UMT5EncoderModel loaded successfully.";
-    this->to(torch::kBFloat16);
+    // this->to(torch::kFloat32);
   }
 
   void verify_loaded_weights() const {
