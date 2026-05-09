@@ -276,18 +276,11 @@ class UniPCMultistepSchedulerImpl : public torch::nn::Module {
     torch::Tensor model_output_convert =
         convert_model_output(model_output, sample);
 
-    torch::save(
-        model_output_convert,
-        "/home/weinan5/zjs/tensors_save_dir/cpp/model_output_convert_cpp.pt");
-
     if (use_corrector) {
       LOG(INFO) << "scheduler step use_corrector";
       sample = multistep_uni_c_bh_update(
           model_output_convert, last_sample_, sample, this_order_);
     }
-    torch::save(
-        sample,
-        "/home/weinan5/zjs/tensors_save_dir/cpp/scheduler_sample_cpp.pt");
 
     for (int i = 0; i < solver_order_ - 1; ++i) {
       model_outputs_[i] = model_outputs_[i + 1];
@@ -312,10 +305,6 @@ class UniPCMultistepSchedulerImpl : public torch::nn::Module {
     last_sample_ = sample;
     torch::Tensor prev_sample =
         multistep_uni_p_bh_update(model_output, sample, this_order_);
-
-    torch::save(
-        prev_sample,
-        "/home/weinan5/zjs/tensors_save_dir/cpp/scheduler_prevsample_cpp.pt");
 
     if (lower_order_nums_ < solver_order_) {
       lower_order_nums_++;

@@ -743,7 +743,7 @@ class WanAttentionImpl : public torch::nn::Module {
     torch::Tensor query = to_q_->forward(hidden_states);
     torch::Tensor key = to_k_->forward(encoder_hidden_states_text);
     torch::Tensor value = to_v_->forward(encoder_hidden_states_text);
-
+    /*
     if (!save_prefix.empty()) {
       // [SAVE_REDUCE] 只保留关键 tensor 的 save，加速比对
       std::string cpp_save_dir = "/home/weinan5/zjs/tensors_save_dir/cpp";
@@ -756,10 +756,11 @@ class WanAttentionImpl : public torch::nn::Module {
         // layer_tag + "_cpp.pt");
       }
     }
+    */
 
     query = std::get<0>(norm_q_->forward(query));
     key = std::get<0>(norm_k_->forward(key));
-
+    /*
     if (!save_prefix.empty()) {
       std::string cpp_save_dir = "/home/weinan5/zjs/tensors_save_dir/cpp";
       std::string layer_tag = "_layer_" + save_prefix;
@@ -769,6 +770,7 @@ class WanAttentionImpl : public torch::nn::Module {
         // "/k_after_normk" + layer_tag + "_cpp.pt");
       }
     }
+    */
 
     if (FLAGS_tp_size > 1) {
       query = parallel_state::scatter(
@@ -792,7 +794,7 @@ class WanAttentionImpl : public torch::nn::Module {
       query = wan_apply_rotary_emb(query, freqs_cos, freqs_sin);
       key = wan_apply_rotary_emb(key, freqs_cos, freqs_sin);
     }
-
+    /*
     if (!save_prefix.empty()) {
       std::string cpp_save_dir = "/home/weinan5/zjs/tensors_save_dir/cpp";
       std::string layer_tag = "_layer_" + save_prefix;
@@ -824,6 +826,7 @@ class WanAttentionImpl : public torch::nn::Module {
         // "/self_attn_v_before_attn" + layer_tag + "_cpp.pt");
       }
     }
+    */
 
     torch::Tensor hidden_states_img;
     if (encoder_hidden_states_img.defined()) {
@@ -918,7 +921,7 @@ class WanAttentionImpl : public torch::nn::Module {
     if (hidden_states_img.defined()) {
       hidden_states = hidden_states + hidden_states_img;
     }
-
+    /*
     if (!save_prefix.empty()) {
       std::string cpp_save_dir = "/home/weinan5/zjs/tensors_save_dir/cpp";
       std::string layer_tag = "_layer_" + save_prefix;
@@ -934,9 +937,10 @@ class WanAttentionImpl : public torch::nn::Module {
         // "/attn_before_o_proj" + layer_tag + "_cpp.pt");
       }
     }
+    */
 
     hidden_states = to_out_->forward(hidden_states);
-
+    /*
     if (!save_prefix.empty()) {
       std::string cpp_save_dir = "/home/weinan5/zjs/tensors_save_dir/cpp";
       std::string layer_tag = "_layer_" + save_prefix;
@@ -945,6 +949,7 @@ class WanAttentionImpl : public torch::nn::Module {
         // "/attn_after_o_proj" + layer_tag + "_cpp.pt");
       }
     }
+    */
 
     return hidden_states;
   }
@@ -1413,9 +1418,9 @@ class WanTransformerBlockImpl : public torch::nn::Module {
     // gate_stats(c_shift_msa, "c_shift_msa");
     // }
 
-    std::string save_dir = "/home/weinan5/zjs/tensors_save_dir/cpp";
-    std::string layer_suffix =
-        "_layer_" + std::to_string(block_idx_) + "_cpp.pt";
+    // std::string save_dir = "/home/weinan5/zjs/tensors_save_dir/cpp";
+    // std::string layer_suffix =
+    "_layer_" + std::to_string(block_idx_) + "_cpp.pt";
 
     // [DISABLED] modulation params already verified OK
     // if (parallel_args_.rank_ == 0) {
@@ -1594,10 +1599,12 @@ class WanTransformerBlockImpl : public torch::nn::Module {
 
     // LOG(INFO) << "[SAVE_DEBUG] block_" << block_idx_ << " before save
     // block_output"; [SAVE_ALL] 所有层都保存
+    /*
     if (parallel_args_.rank_ == 0) {
       torch::save(hidden_states.contiguous(),
                   save_dir + "/block_output" + layer_suffix);
     }
+    */
     // LOG(INFO) << "[SAVE_DEBUG] block_" << block_idx_ << " done";
 
     return hidden_states;
@@ -1783,9 +1790,6 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
     //   }
     // }
 
-    torch::save(
-        hidden_states.contiguous(),
-        "/home/weinan5/zjs/tensors_save_dir/cpp/patch_embedding_cpp.pt");
     torch::Tensor timestep_input = timestep;
     std::optional<int64_t> ts_seq_len = std::nullopt;
     if (timestep.dim() == 2) {
@@ -1808,21 +1812,12 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
                                      ts_seq_len);
     LOG(INFO) << "[DIAG_FWD] after condition_embedder OK";
 
-    torch::save(temb.contiguous(),
-                "/home/weinan5/zjs/tensors_save_dir/cpp/temb_cpp.pt");
-    torch::save(
-        encoder_hidden_states_embedded.contiguous(),
-        "/home/weinan5/zjs/tensors_save_dir/cpp/prompt_embeds_tensor_cpp.pt");
-
     if (ts_seq_len.has_value()) {
       timestep_proj =
           timestep_proj.view({batch_size, ts_seq_len.value(), 6, -1});
     } else {
       timestep_proj = timestep_proj.view({batch_size, 6, -1});
     }
-
-    torch::save(timestep_proj.contiguous(),
-                "/home/weinan5/zjs/tensors_save_dir/cpp/timestep_proj_cpp.pt");
 
     if (encoder_hidden_states_image_embedded.defined()) {
       encoder_hidden_states_embedded =
@@ -1887,9 +1882,6 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
                                         -1});
     hidden_states = hidden_states.permute({0, 7, 1, 4, 2, 5, 3, 6});
     hidden_states = hidden_states.flatten(6, 7).flatten(4, 5).flatten(2, 3);
-    torch::save(
-        hidden_states.cpu().contiguous(),
-        "/home/weinan5/zjs/tensors_save_dir/cpp/final_transformer_cpp.pt");
     return hidden_states;
   }
 

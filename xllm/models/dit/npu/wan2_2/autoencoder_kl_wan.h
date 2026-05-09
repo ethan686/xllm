@@ -1023,8 +1023,6 @@ class WanVAEEncoder3DImpl : public torch::nn::Module {
       x = conv_in_->forward(x);
     }
     LOG(INFO) << "————————————————————VAEEncoder5————————————————————————";
-    // wsd
-    torch::save(x, "/home/weinan5/zjs/tensors_save_dir/cpp/wsd_x_conv1_cpp.pt");
 
     LOG(INFO)
         << "~~~~ ~~~ ~~~~ ~~~~~~~ ~~~~~~~ ~~~~~ ~~~~~~~~ ~~~~~~~~ ~~~`~ ~~~~";
@@ -1043,13 +1041,13 @@ class WanVAEEncoder3DImpl : public torch::nn::Module {
       }
     }
     // wsd
-    torch::save(
-        x, "/home/weinan5/zjs/tensors_save_dir/cpp/wsd_x_downsamlpes_cpp.pt");
+    // torch::save(
+    //    x, "/home/weinan5/zjs/tensors_save_dir/cpp/wsd_x_downsamlpes_cpp.pt");
 
     x = mid_block_->forward(x, feat_cache, feat_idx);
     // wsd
-    torch::save(x,
-                "/home/weinan5/zjs/tensors_save_dir/cpp/wsd_x_middle_cpp.pt");
+    //  torch::save(x,
+    //             "/home/weinan5/zjs/tensors_save_dir/cpp/wsd_x_middle_cpp.pt");
     x = norm_out_->forward(x);
     x = nonlinearity_(x);
     if (feat_cache) {
@@ -1080,8 +1078,6 @@ class WanVAEEncoder3DImpl : public torch::nn::Module {
     } else {
       x = conv_out_->forward(x);
     }
-    // wsd
-    torch::save(x, "/home/weinan5/zjs/tensors_save_dir/cpp/wsd_x_head_cpp.pt");
     return x;
   }
 

@@ -39,11 +39,13 @@ class UMT5LayerNormImpl : public torch::nn::Module {
   }
 
   torch::Tensor forward(torch::Tensor hidden_states) {
+    /*
     if (is_save_) {
       torch::save(
           weight_,
           "/home/weinan5/zjs/tensors_save_dir/cpp/rmsnorm_weight_cpp.pt");
     }
+    */
     auto variance = hidden_states.to(torch::kFloat32).pow(2).mean(-1, true);
     LOG(INFO) << "zhubowei variance_epsilon_" << variance_epsilon_;
     hidden_states = hidden_states * torch::rsqrt(variance + variance_epsilon_);

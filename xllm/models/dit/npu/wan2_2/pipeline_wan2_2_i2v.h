@@ -173,29 +173,25 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
                                   latent_height,
                                   latent_width};
     torch::Tensor latents_tensor;
+    LOG(INFO) << "===================== latent tensor info start "
+                 "======================";
+    LOG(INFO) << "latents.has_value():"
+              << (latents.has_value() ? "true" : "false") << " shape:" << shape
+              << " seed:" << seed << " device:" << options_.device()
+              << " dtype:" << options_.dtype();
+
+    LOG(INFO) << "====================== latent tensor info end "
+                 "======================";
 
     if (latents.has_value()) {
       latents_tensor = latents.value().to(options_.device());
     } else {
-      latents_tensor = randn_tensor(shape, seed, options_);
+      latents_tensor =
+          xllm::dit::randn_tensor(shape, seed, options_, torch::kFloat32);
     }
-
-    // wsd
-    auto state_dict = StateDictFromSafeTensor::load(
-        "/home/weinan5/zjs/tensors_save_dir/saved_safetensors/"
-        "wsd_noise.safetensors");
-    auto input_random_latents = torch::ones({16, 21, 90, 68}, torch::kFloat32);
-    bool is_conv_out_weight_loaded = false;
-    weight::load_weight(
-        *state_dict, "noise", input_random_latents, is_conv_out_weight_loaded);
-
-    latents_tensor = input_random_latents.unsqueeze(0)
-                         .to(options_.device())
-                         .to(torch::kFloat32);
-    // end
-
-    torch::save(latents_tensor,
-                "/home/weinan5/zjs/tensors_save_dir/cpp/latents_tensor_cpp.pt");
+    torch::save(
+        latents_tensor,
+        "/export/home/weinan5/wsd/tensors_save_dir/cpp/wsd_noise111_cpp.pt");
 
     image = image.unsqueeze(2);
     torch::Tensor video_condition;
@@ -215,14 +211,6 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
       video_condition = torch::cat({image, zeros, last_img}, 2);
     }
     video_condition = video_condition.to(options_.device()).to(torch::kFloat32);
-    // save tensor
-    // -----------------------------------------------------------------
-    torch::save(
-        video_condition,
-        "/home/weinan5/zjs/tensors_save_dir/cpp/video_condition_cpp.pt");
-    // save tensor
-    // -----------------------------------------------------------------
-
     LOG(INFO) << "video_condition shape=" << video_condition.sizes()
               << " device=" << video_condition.device();
 
@@ -246,14 +234,6 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
     }
 
     latent_condition = (latent_condition - latents_mean) * latents_std;
-
-    // save tensor
-    // -----------------------------------------------------------------
-    torch::save(
-        latent_condition,
-        "/home/weinan5/zjs/tensors_save_dir/cpp/latent_condition_cpp.pt");
-    // save tensor
-    // -----------------------------------------------------------------
 
     if (latent_condition.size(0) == 1 && batch_size > 1) {
       latent_condition = latent_condition.repeat({batch_size, 1, 1, 1, 1});
@@ -295,18 +275,10 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
                                         latent_width});
     mask_lat_size = mask_lat_size.transpose(1, 2);
 
-    // wsd
-    torch::save(mask_lat_size,
-                "/home/weinan5/zjs/tensors_save_dir/cpp/msk_cpp.pt");
-
     mask_lat_size = mask_lat_size.to(latent_condition.device());
 
     torch::Tensor combined_condition =
         torch::cat({mask_lat_size, latent_condition}, 1);
-
-    torch::save(
-        combined_condition,
-        "/home/weinan5/zjs/tensors_save_dir/cpp/combined_condition_cpp.pt");
 
     return {latents_tensor, combined_condition, first_frame_mask};
   }
@@ -338,12 +310,6 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
         torch::tensor(text_input_ids_flat, torch::dtype(torch::kLong))
             .view({batch_size, max_sequence_length})
             .to(options_.device());
-    // save tensor
-    // -----------------------------------------------------------------
-    torch::save(input_ids,
-                "/home/weinan5/zjs/tensors_save_dir/cpp/input_ids_cpp.pt");
-    // save tensor
-    // -----------------------------------------------------------------
 
     torch::Tensor attention_mask =
         (1.0 - (input_ids > 0).to(options_.dtype()).unsqueeze(1).unsqueeze(2)) *
@@ -351,10 +317,6 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
     torch::Tensor prompt_embeds = umt5_->forward(input_ids, attention_mask);
 
     prompt_embeds = prompt_embeds.to(options_);
-
-    torch::save(
-        prompt_embeds,
-        "/home/weinan5/zjs/tensors_save_dir/cpp/prompt_embeds_tensor_cpp.pt");
 
     auto seq_lens = (input_ids > 0).sum(1).to(torch::kLong);
     LOG(INFO) << "prompt_embeds shape" << prompt_embeds.sizes();
@@ -441,7 +403,6 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
     // auto save_negative_prompt_embeds =
     // negative_prompt_embeds_tensor.to(torch::kCPU);
     // torch::save(prompt_embeds_tensor,
-    // "/home/weinan5/zjs/tensors_save_dir/cpp/prompt_embeds_tensor_cpp.pt");
     // torch::save(negative_prompt_embeds_tensor,
     // "/home/weinan5/zjs/tensors_save_dir/cpp/negative_prompt_embeds_tensor_cpp.pt");
 
@@ -576,35 +537,6 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
                       do_classifier_free_guidance,
                       num_videos_per_prompt,
                       max_sequence_length);
-    /*
-    auto a = encoded_prompt_embeds;
-    auto state_dict_1 = StateDictFromSafeTensor::load(
-                    "/home/weinan5/zjs/tensors_save_dir/saved_safetensors/prompt_embeds.safetensors");
-    auto input_prompt_embeds = torch::ones({1, 512, 4096}, torch::kFloat32);
-    bool is_conv_out_weight_loaded_1 = false;
-    weight::load_weight(*state_dict_1, "saved_111", input_prompt_embeds,
-    is_conv_out_weight_loaded_1);
-
-    encoded_prompt_embeds =
-    input_prompt_embeds.to(options_.device()).to(a.dtype());
-
-
-
-    auto state_dict_2 = StateDictFromSafeTensor::load(
-                    "/home/weinan5/zjs/tensors_save_dir/saved_safetensors/negative_prompt_embeds.safetensors");
-    auto input_negative_prompt_embeds = torch::ones({1, 512, 4096},
-    torch::kFloat32); bool is_conv_out_weight_loaded_2 = false;
-    weight::load_weight(*state_dict_2, "saved_222",
-    input_negative_prompt_embeds, is_conv_out_weight_loaded_2);
-
-    encoded_negative_embeds =
-    input_negative_prompt_embeds.to(options_.device()).to(a.dtype());
-
-    torch::save(encoded_prompt_embeds,
-    "/home/weinan5/zjs/tensors_save_dir/cpp/prompt_embeds_tensor_cpp.pt");
-    torch::save(encoded_negative_embeds,
-    "/home/weinan5/zjs/tensors_save_dir/cpp/negative_prompt_embeds_tensor_cpp.pt");
-    */
 
     scheduler_->set_timesteps(num_inference_steps, options_.device());
     torch::Tensor timesteps = scheduler_->timesteps();
@@ -625,10 +557,6 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
         video_processor_->preprocess(input_image, height, width);
     preprocessed_image =
         preprocessed_image.to(options_.device(), torch::kFloat32);
-
-    torch::save(
-        preprocessed_image,
-        "/home/weinan5/zjs/tensors_save_dir/cpp/image_preprocess_cpp.pt");
 
     // Ensure 4D: (B, C, H, W) — prepare_latents will add time dim
     if (preprocessed_image.dim() == 3) {
@@ -687,6 +615,7 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
     for (int64_t i = 0; i < timesteps.numel(); ++i) {
       torch::Tensor t = timesteps[i];
       int64_t total_steps = timesteps.numel();
+      /*
       bool should_save = (i == 0 || i == 1 || i == 2 || i == total_steps - 1);
       auto save_tensor = [&](const torch::Tensor& tensor,
                              const std::string& name) {
@@ -696,6 +625,7 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
                           std::to_string(i) + "_cpp.pt");
         }
       };
+      */
 
       Wan22DiTModel current_model = nullptr;
       float current_guidance;
@@ -732,16 +662,8 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
             torch::cat({prepared_latents, latent_condition}, 1);
         latent_model_input = latent_model_input.to(prepared_latents.dtype());
 
-        if (i == timesteps.numel() - 1) {
-          // save tensor
-          // -----------------------------------------------------------------
-          torch::save(latent_model_input,
-                      "/home/weinan5/zjs/tensors_save_dir/cpp/"
-                      "latent_model_input_cpp.pt");
-        }
-        // save tensor
-        // -----------------------------------------------------------------
-        save_tensor(prepared_latents, "latent_input");
+        // if (i == timesteps.numel() - 1) {
+        // save_tensor(prepared_latents, "latent_input");
 
         // std::string save_path =
         // "/home/weinan5/zjs/tensors_save_dir/cpp/latent_model_input" +
@@ -788,11 +710,12 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
                                                         timestep_input,
                                                         encoded_prompt_embeds,
                                                         torch::Tensor());
+      /*
       if (i == timesteps.numel() - 1) {
         torch::save(noise_pred,
                     "/home/weinan5/zjs/tensors_save_dir/cpp/noise_pred_cpp.pt");
       }
-      save_tensor(noise_pred, "noise_pred");
+      */
 
       if (do_classifier_free_guidance) {
         LOG(INFO) << "do the cfg logic";
@@ -808,13 +731,14 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
                                    timestep_input,
                                    encoded_negative_embeds,
                                    torch::Tensor());
+        /*
         if (i == timesteps.numel() - 1) {
           torch::save(
               noise_uncond,
               "/home/weinan5/zjs/tensors_save_dir/cpp/noise_uncond_cpp.pt");
         }
         save_tensor(noise_uncond, "noise_uncond");
-
+        */
         // CFG in FP32 to avoid BF16 amplification by guidance_scale
         auto noise_pred_f = noise_pred.to(torch::kFloat32);
         auto noise_uncond_f = noise_uncond.to(torch::kFloat32);
@@ -822,23 +746,26 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
                                            (noise_pred_f - noise_uncond_f))
                          .to(noise_pred.dtype());
         noise_uncond.reset();
+        /*
         if (i == timesteps.numel() - 1) {
           torch::save(noise_pred,
                       "/home/weinan5/zjs/tensors_save_dir/cpp/"
                       "noise_pred_with_cfg_cpp.pt");
         }
         save_tensor(noise_pred, "noise_pred_with_cfg");
+        */
       }
 
       LOG(INFO) << "t=" << t.item<float>();
       auto prev_latents = scheduler_->step(noise_pred, t, prepared_latents);
+      /*
       if (i == timesteps.numel() - 1) {
         torch::save(prev_latents,
                     "/home/weinan5/zjs/tensors_save_dir/cpp/"
                     "after_scheduler_step_cpp.pt");
       }
       save_tensor(prev_latents, "after_scheduler_step");
-
+      */
       prepared_latents = prev_latents.detach().to(options_.dtype());
       noise_pred.reset();
       prev_latents = torch::Tensor();
@@ -868,17 +795,9 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
 
     prepared_latents = prepared_latents / latents_std + latents_mean;
     LOG(INFO) << "________________________开始decode_________________________";
-    torch::save(
-        prepared_latents,
-        "/home/weinan5/zjs/tensors_save_dir/cpp/denoised_latents_cpp.pt");
     video = vae_->decode(prepared_latents.to(torch::kFloat32)).sample;
-    torch::save(video,
-                "/home/weinan5/zjs/tensors_save_dir/cpp/vae_decode_cpp.pt");
     LOG(INFO) << "________________________结束decode_________________________";
     LOG(INFO) << "输出张量video的shape是：" << video.sizes();
-    // save tensor -----------------------------------------------------------
-    torch::save(video, "/home/weinan5/zjs/tensors_save_dir/cpp/video_cpp.pt");
-    // save tensor ----------------------------------------------------------
     video = video_processor_->postprocess_video(video);
 
     return video;

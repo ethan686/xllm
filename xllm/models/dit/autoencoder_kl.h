@@ -45,6 +45,7 @@ torch::Tensor randn_tensor(const std::vector<int64_t>& shape,
   if (shape.empty()) {
     LOG(FATAL) << "Shape must not be empty.";
   }
+  LOG(INFO) << "==================wsd auto encoding===========================";
   at::Generator gen = at::detail::createCPUGenerator();
   gen = gen.clone();
   gen.set_current_seed(seed);
