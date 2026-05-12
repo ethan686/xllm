@@ -156,15 +156,10 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
       std::optional<torch::Tensor> last_image = std::nullopt,
       int64_t seed = 42,
       std::optional<torch::Tensor> latents = std::nullopt) {
-    LOG(INFO) << "height:" << height << "width:" << width;
-
     int64_t num_latent_frames =
         (num_frames - 1) / vae_scale_factor_temporal_ + 1;
     int64_t latent_height = height / vae_scale_factor_spatial_;
     int64_t latent_width = width / vae_scale_factor_spatial_;
-
-    LOG(INFO) << "latent_height:" << latent_height
-              << "latent_width:" << latent_width;
 
     std::vector<int64_t> shape = {batch_size,
                                   num_channels_latents,
@@ -178,23 +173,6 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
     } else {
       latents_tensor = randn_tensor(shape, seed, options_);
     }
-
-    // wsd
-    auto state_dict = StateDictFromSafeTensor::load(
-        "/home/weinan5/zjs/tensors_save_dir/saved_safetensors/"
-        "wsd_noise.safetensors");
-    auto input_random_latents = torch::ones({16, 21, 90, 68}, torch::kFloat32);
-    bool is_conv_out_weight_loaded = false;
-    weight::load_weight(
-        *state_dict, "noise", input_random_latents, is_conv_out_weight_loaded);
-
-    latents_tensor = input_random_latents.unsqueeze(0)
-                         .to(options_.device())
-                         .to(torch::kFloat32);
-    // end
-
-    torch::save(latents_tensor.contiguous().to(torch::kFloat32).cpu(),
-                "/home/weinan5/zjs/tensors_save_dir/cpp/latents_tensor_cpp.pt");
 
     image = image.unsqueeze(2);
     torch::Tensor video_condition;
@@ -214,35 +192,6 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
       video_condition = torch::cat({image, zeros, last_img}, 2);
     }
     video_condition = video_condition.to(options_.device()).to(torch::kFloat32);
-    // save tensor
-    // -----------------------------------------------------------------
-    torch::save(
-        video_condition,
-        "/home/weinan5/zjs/tensors_save_dir/cpp/video_condition_cpp.pt");
-
-    // Load shared encoder input from Python to ensure identical inputs
-    // NOTE: Python safetensor has shape [3,21,720,544] but C++ expects
-    // [1,3,81,720,544] Skipping encoder input loading — using
-    // latent_model_input loading instead auto enc_input_sd =
-    // StateDictFromSafeTensor::load(
-    //     "/home/weinan5/zjs/tensors_save_dir/saved_safetensors/wsd_encoder_input.safetensors");
-    // auto enc_tensor = torch::ones({3, 21, 720, 544}, torch::kFloat32);
-    // bool enc_input_loaded = false;
-    // weight::load_weight(*enc_input_sd, "encoder_input", enc_tensor,
-    // enc_input_loaded); if (enc_input_loaded) {
-    //   video_condition =
-    //   enc_tensor.unsqueeze(0).to(options_.device()).to(torch::kFloat32);
-    //   LOG(INFO) << "Loaded Python encoder input, shape=" <<
-    //   video_condition.sizes();
-    // } else {
-    //   LOG(WARNING) << "Failed to load Python encoder input, using C++
-    //   preprocessed version";
-    // }
-    // save tensor
-    // -----------------------------------------------------------------
-
-    LOG(INFO) << "video_condition shape=" << video_condition.sizes()
-              << " device=" << video_condition.device();
 
     torch::Tensor latents_mean =
         torch::tensor(latents_mean_, torch::dtype(torch::kFloat32))
@@ -254,43 +203,8 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
                   .to(latents_tensor.device(), latents_tensor.dtype());
 
     torch::Tensor latent_condition;
-    try {
-      latent_condition = vae_->encode(video_condition).latent_dist.mode();
-    } catch (const std::exception& e) {
-      LOG(ERROR) << "VAE encode failed: " << e.what()
-                 << " video_condition device=" << video_condition.device()
-                 << " shape=" << video_condition.sizes();
-      throw;
-    }
-
+    latent_condition = vae_->encode(video_condition).latent_dist.mode();
     latent_condition = (latent_condition - latents_mean) * latents_std;
-
-    // [PYTHON_INPUT] latent_condition loading disabled — inputs don't impact TP
-    // compounding test
-    // {
-    //   auto sd_lc = StateDictFromSafeTensor::load(
-    //       "/home/weinan5/zjs/tensors_save_dir/saved_safetensors/latent_condition.safetensors");
-    //   auto py_lc = torch::ones_like(latent_condition);
-    //   bool lc_loaded = false;
-    //   weight::load_weight(*sd_lc, "latent_condition", py_lc, lc_loaded);
-    //   if (lc_loaded) {
-    //     latent_condition = py_lc;
-    //     LOG(INFO) << "[PYTHON_INPUT] Replaced latent_condition with Python
-    //     tensor, shape="
-    //               << latent_condition.sizes();
-    //   } else {
-    //     LOG(WARNING) << "[PYTHON_INPUT] Failed to load Python
-    //     latent_condition";
-    //   }
-    // }
-
-    // save tensor
-    // -----------------------------------------------------------------
-    torch::save(
-        latent_condition,
-        "/home/weinan5/zjs/tensors_save_dir/cpp/latent_condition_cpp.pt");
-    // save tensor
-    // -----------------------------------------------------------------
 
     if (latent_condition.size(0) == 1 && batch_size > 1) {
       latent_condition = latent_condition.repeat({batch_size, 1, 1, 1, 1});
@@ -331,36 +245,10 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
                                         latent_height,
                                         latent_width});
     mask_lat_size = mask_lat_size.transpose(1, 2);
-
-    // wsd
-    torch::save(mask_lat_size,
-                "/home/weinan5/zjs/tensors_save_dir/cpp/msk_cpp.pt");
-
-    // [PYTHON_INPUT] msk loading disabled — inputs don't impact TP compounding
-    // test
-    // {
-    //   auto sd_msk = StateDictFromSafeTensor::load(
-    //       "/home/weinan5/zjs/tensors_save_dir/saved_safetensors/msk.safetensors");
-    //   auto py_msk = torch::ones_like(mask_lat_size);
-    //   bool msk_loaded = false;
-    //   weight::load_weight(*sd_msk, "msk", py_msk, msk_loaded);
-    //   if (msk_loaded) {
-    //     mask_lat_size = py_msk;
-    //     LOG(INFO) << "[PYTHON_INPUT] Replaced msk with Python tensor, shape="
-    //               << mask_lat_size.sizes();
-    //   } else {
-    //     LOG(WARNING) << "[PYTHON_INPUT] Failed to load Python msk";
-    //   }
-    // }
-
     mask_lat_size = mask_lat_size.to(latent_condition.device());
 
     torch::Tensor combined_condition =
         torch::cat({mask_lat_size, latent_condition}, 1);
-
-    torch::save(
-        combined_condition,
-        "/home/weinan5/zjs/tensors_save_dir/cpp/combined_condition_cpp.pt");
 
     return {latents_tensor, combined_condition, first_frame_mask};
   }
@@ -392,11 +280,6 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
         torch::tensor(text_input_ids_flat, torch::dtype(torch::kLong))
             .view({batch_size, max_sequence_length})
             .to(options_.device());
-    // save tensor
-    // -----------------------------------------------------------------
-    // torch::save(input_ids,
-    // "/home/weinan5/zjs/tensors_save_dir/cpp/input_ids_cpp.pt"); save tensor
-    // -----------------------------------------------------------------
 
     torch::Tensor attention_mask =
         (1.0 - (input_ids > 0).to(options_.dtype()).unsqueeze(1).unsqueeze(2)) *
@@ -404,9 +287,6 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
     torch::Tensor prompt_embeds = umt5_->forward(input_ids, attention_mask);
 
     prompt_embeds = prompt_embeds.to(options_);
-
-    // torch::save(prompt_embeds,
-    // "/home/weinan5/zjs/tensors_save_dir/cpp/prompt_embeds_tensor_cpp.pt");
 
     auto seq_lens = (input_ids > 0).sum(1).to(torch::kLong);
     LOG(INFO) << "prompt_embeds shape" << prompt_embeds.sizes();
@@ -463,14 +343,8 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
     }
 
     if (do_classifier_free_guidance) {
-      LOG(INFO) << "test encode_prompt do_classifier_free_guidance";
       if (negative_prompt.has_value()) {
-        LOG(INFO) << "test encode_prompt, negative_prompt.has_value";
         int prompt_size = negative_prompt.value().size();
-        LOG(INFO) << "negative_prompt.size()" << prompt_size;
-        for (int i = 0; i < prompt_size; i++) {
-          LOG(INFO) << "negative prompt" << negative_prompt.value()[i];
-        }
         negative_prompt_embeds_tensor =
             get_t5_prompt_embeds(negative_prompt.value(),
                                  num_videos_per_prompt,
@@ -483,20 +357,6 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
             empty_prompt, num_videos_per_prompt, max_sequence_length);
       }
     }
-    // save tensor
-    // -----------------------------------------------------------------
-    LOG(INFO) << "prompt_embeds_tensor shape" << prompt_embeds_tensor.sizes();
-    LOG(INFO) << "negative prompt_embeds_tensor shape"
-              << negative_prompt_embeds_tensor.sizes();
-
-    // torch::save(prompt_embeds_tensor,
-    // "/home/weinan5/zjs/tensors_save_dir/cpp/prompt_embeds_tensor_cpp.pt");
-    // torch::save(negative_prompt_embeds_tensor,
-    // "/home/weinan5/zjs/tensors_save_dir/cpp/negative_prompt_embeds_tensor_cpp.pt");
-
-    // save tensor
-    // -----------------------------------------------------------------
-
     return {prompt_embeds_tensor, negative_prompt_embeds_tensor};
   }
 
@@ -531,8 +391,6 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
         negative_prompt.has_value() || (negative_prompt_embeds.has_value());
 
     bool do_classifier_free_guidance = guidance_scale > 1.0f;
-
-    LOG(INFO) << "num_frames 的值为：" << num_frames;
 
     if (num_frames % vae_scale_factor_temporal_ != 1) {
       LOG(WARNING) << "num_frames - 1 has to be divisible by "
