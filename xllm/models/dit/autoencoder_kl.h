@@ -81,6 +81,10 @@ class VAEImageProcessorImpl : public torch::nn::Module {
                                                 int64_t width) const {
     height = height - (height % scale_factor_);
     width = width - (width % scale_factor_);
+
+    LOG(INFO) << "adjust_dimensions height" << height;
+    LOG(INFO) << "adjust_dimensions width" << width;
+
     return {height, width};
   }
 
@@ -99,6 +103,7 @@ class VAEImageProcessorImpl : public torch::nn::Module {
       processed = processed / 255.0f;
     }
     if (crop_coords.has_value()) {
+      LOG(INFO) << "crop_coords.has_value()";
       auto [x1, y1, x2, y2] = crop_coords.value();
       x1 = std::max(int64_t(0), x1);
       y1 = std::max(int64_t(0), y1);
@@ -125,9 +130,12 @@ class VAEImageProcessorImpl : public torch::nn::Module {
     auto [target_h, target_w] =
         get_default_height_width(processed, height, width);
     if (do_resize_) {
+      LOG(INFO) << "actually did the image resize";
+      LOG(INFO) << "before resize the shape is processed shape"
+                << processed.sizes();
       processed = resize(processed, target_h, target_w);
     }
-
+    LOG(INFO) << "before normalize shape is " << processed.sizes();
     if (do_normalize_) {
       processed = normalize(processed);
     }
@@ -172,8 +180,15 @@ class VAEImageProcessorImpl : public torch::nn::Module {
       LOG(FATAL) << "Unsupported image dimension: " << image.dim();
     }
 
+    LOG(INFO) << "get_default_height_width h " << h;
+    LOG(INFO) << "get_default_height_width w " << w;
+
     int64_t target_h = height.value_or(h);
     int64_t target_w = width.value_or(w);
+
+    LOG(INFO) << "get_default_height_width target_h " << target_h;
+    LOG(INFO) << "get_default_height_width target_w " << target_w;
+
     return adjust_dimensions(target_h, target_w);
   }
 
@@ -193,13 +208,26 @@ class VAEImageProcessorImpl : public torch::nn::Module {
 
     // Check if 4D tensor (batch, channel, height, width)
     auto img = orig_dim == 3 ? image.unsqueeze(0) : image;
-
+    torch::save(image,
+                "/home/weinan5/zjs/tensors_save_dir/cpp/before_resize_cpp.pt");
     auto resized = torch::nn::functional::interpolate(
         img,
         torch::nn::functional::InterpolateFuncOptions()
             .size(std::vector<int64_t>{target_height, target_width})
-            .mode(torch::kNearest));
+            .mode(torch::kBicubic));  // torch::kNearest
 
+    /*
+    auto state_dict = StateDictFromSafeTensor::load(
+                    "/home/weinan5/zjs/tensors_save_dir/saved_safetensors/after_resize_image.safetensors");
+    auto input_resized = torch::ones({1, 3, 720, 544}, torch::kFloat32);
+    bool is_conv_out_weight_loaded = false;
+    weight::load_weight(*state_dict, "after_resize", input_resized,
+    is_conv_out_weight_loaded);
+
+    resized = input_resized.to(options_.device()).to(torch::kFloat32);
+    */
+    torch::save(resized,
+                "/home/weinan5/zjs/tensors_save_dir/cpp/after_resize_cpp.pt");
     return orig_dim == 3 ? resized.squeeze(0) : resized;
   }
 
