@@ -457,9 +457,8 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
 
     scheduler_->set_timesteps(num_inference_steps,
                               options_.device(),
-                              /*sigmas=*/std::nullopt,
-                              /*mu=*/std::nullopt,
-                              /*shift=*/5.0f);
+                              /*sigmas*/ std::nullopt,
+                              /*mu*/ std::nullopt);
     torch::Tensor timesteps = scheduler_->timesteps();
 
     int64_t num_channels_latents = zdim_;
@@ -589,10 +588,11 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
                          (noise_pred.to(torch::kFloat32) -
                           noise_uncond.to(torch::kFloat32));
         noise_uncond.reset();
+        }
       }
+      */
 
       auto prev_latents = scheduler_->step(noise_pred, t, prepared_latents);
-
       prepared_latents = prev_latents.detach();
       noise_pred.reset();
       prev_latents = torch::Tensor();
