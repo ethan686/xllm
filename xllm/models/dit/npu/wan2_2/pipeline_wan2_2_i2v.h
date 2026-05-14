@@ -18,7 +18,6 @@ limitations under the License.
 #include <algorithm>
 #include <cstring>
 #include <memory>
-#include <string>
 
 #include "autoencoder_kl_wan.h"
 #include "core/framework/dit_model_loader.h"
@@ -405,16 +404,14 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
 
     int64_t patch_size_h = transformer_->patch_size()[1];
     int64_t patch_size_w = transformer_->patch_size()[2];
+
     int64_t dw = vae_scale_factor_spatial_ * patch_size_w;
     int64_t dh = vae_scale_factor_spatial_ * patch_size_h;
 
-    // 环境变量开关：export XLLM_USER_SIZE_PRIORITY=1 启用用户尺寸优先
-    static bool user_size_priority = []() {
-      const char* env = std::getenv("XLLM_USER_SIZE_PRIORITY");
-      return env && strcmp(env, "1") == 0;
-    }();
+    // 硬编码开关：true = 用户尺寸优先，false = 原有图像宽高比
+    static const bool kUseUserSizePriority = false;  // 按需修改此处
 
-    if (user_size_priority) {
+    if (kUseUserSizePriority) {
       // 用户尺寸最高优先级：仅强制对齐到16倍数
       if (height % dh != 0) {
         height = (height / dh) * dh;
@@ -427,35 +424,10 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
                      << ")";
       }
     } else {
-      // 原有逻辑：基于图像宽高比和面积选择最佳候选尺寸
-      int64_t max_area = height * width;
-      int64_t ih = images.has_value() ? images.value().size(-2) : height;
-      int64_t iw = images.has_value() ? images.value().size(-1) : width;
-      double ratio = static_cast<double>(iw) / ih;
-
-      int64_t ow1 = static_cast<int64_t>(std::sqrt(max_area * ratio)) / dw * dw;
-      int64_t oh1 = (max_area / ow1) / dh * dh;
-      double ratio1 = static_cast<double>(ow1) / oh1;
-
-      int64_t oh2 = static_cast<int64_t>(std::sqrt(max_area / ratio)) / dh * dh;
-      int64_t ow2 = (max_area / oh2) / dw * dw;
-      double ratio2 = static_cast<double>(ow2) / oh2;
-
-      int64_t calc_height, calc_width;
-      if (std::max(ratio / ratio1, ratio1 / ratio) <
-          std::max(ratio / ratio2, ratio2 / ratio)) {
-        calc_width = ow1;
-        calc_height = oh1;
-      } else {
-        calc_width = ow2;
-        calc_height = oh2;
-      }
-
-      if (height != calc_height || width != calc_width) {
-        height = calc_height;
-        width = calc_width;
-      }
+      // 调用封装好的原有逻辑函数
+      AdjustSizeByAspectRatio(images, height, width, dw, dh);
     }
+
     if (boundary_ratio_ > 0.0f && guidance_scale_2 < 0.0f) {
       guidance_scale_2 = guidance_scale;
     }
@@ -626,6 +598,43 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
     video = video_processor_->postprocess_video(video);
 
     return video;
+  }
+
+  // 封装原有尺寸逻辑
+  void AdjustSizeByAspectRatio(const std::optional<torch::Tensor>& images,
+                               int64_t& height,
+                               int64_t& width,
+                               int64_t dw,
+                               int64_t dh) {
+    int64_t max_area = height * width;
+    int64_t ih = images.has_value() ? images.value().size(-2) : height;
+    int64_t iw = images.has_value() ? images.value().size(-1) : width;
+    double ratio = static_cast<double>(iw) / ih;
+
+    int64_t ow1 = static_cast<int64_t>(std::sqrt(max_area * ratio)) / dw * dw;
+    int64_t oh1 = (max_area / ow1) / dh * dh;
+    double ratio1 = static_cast<double>(ow1) / oh1;
+
+    int64_t oh2 = static_cast<int64_t>(std::sqrt(max_area / ratio)) / dh * dh;
+    int64_t ow2 = (max_area / oh2) / dw * dw;
+    double ratio2 = static_cast<double>(ow2) / oh2;
+
+    int64_t calc_height, calc_width;
+    if (std::max(ratio / ratio1, ratio1 / ratio) <
+        std::max(ratio / ratio2, ratio2 / ratio)) {
+      calc_width = ow1;
+      calc_height = oh1;
+    } else {
+      calc_width = ow2;
+      calc_height = oh2;
+    }
+
+    if (height != calc_height || width != calc_width) {
+      height = calc_height;
+      width = calc_width;
+      LOG(INFO) << "Size adjusted by aspect ratio: height=" << height
+                << ", width=" << width;
+    }
   }
 
  private:
