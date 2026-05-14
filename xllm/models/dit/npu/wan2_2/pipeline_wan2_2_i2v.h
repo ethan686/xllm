@@ -408,13 +408,8 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
     int64_t dw = vae_scale_factor_spatial_ * patch_size_w;
     int64_t dh = vae_scale_factor_spatial_ * patch_size_h;
 
-    // Hardcoded switch: true = user priority (only align to 16x),
-    //                   false = original logic (aspect ratio based)
-    static const bool kUseUserSizePriority =
-        false;  // Change to false for original behavior
-
     // Call unified function for dimension adjustment
-    AdjustVideoSize(images, height, width, dw, dh, kUseUserSizePriority);
+    AdjustVideoSize(images, height, width, dw, dh, false);
 
     if (boundary_ratio_ > 0.0f && guidance_scale_2 < 0.0f) {
       guidance_scale_2 = guidance_scale;
