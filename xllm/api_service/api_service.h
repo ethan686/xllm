@@ -36,8 +36,11 @@ limitations under the License.
 namespace xllm {
 
 class ClosureGuard;
+class ServiceImplFactory;
 
 class APIService : public proto::XllmAPIService {
+  friend class ServiceImplFactory;
+
  public:
   APIService(Master* master,
              const std::vector<std::string>& model_names,

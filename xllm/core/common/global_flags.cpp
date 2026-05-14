@@ -343,8 +343,6 @@ DEFINE_string(kv_cache_transfer_mode,
               "PUSH",
               "The mode of kv cache transfer(e.g. PUSH, PULL).");
 
-DEFINE_int32(npu_phy_id, -1, "npu phy id");
-
 DEFINE_int32(transfer_listen_port, 26000, "The KVCacheTranfer listen port.");
 
 DEFINE_uint64(input_shm_size,
@@ -408,19 +406,23 @@ DEFINE_bool(enable_atb_spec_kernel,
 
 // --- block copy config ---
 
-#if defined(USE_NPU)
+#if defined(USE_NPU) || defined(USE_CUDA)
 DEFINE_bool(enable_block_copy_kernel,
             true,
-            "Whether to use ATB block copy kernel. NPU-only.");
+            "Whether to use block copy kernel on supported backends.");
 #else
 DEFINE_bool(enable_block_copy_kernel,
             false,
-            "Whether to use ATB block copy kernel. NPU-only.");
+            "Whether to use block copy kernel on supported backends.");
 #endif
 
 // --- service routing config ---
 
 DEFINE_string(etcd_addr, "", "Etcd adderss for save instance meta info.");
+
+DEFINE_string(etcd_namespace,
+              "",
+              "Optional etcd namespace prefix for all xllm keys, e.g. prod-a.");
 
 DEFINE_bool(enable_service_routing,
             false,
@@ -625,6 +627,10 @@ DEFINE_bool(enable_constrained_decoding,
             "that the output meets specific format or structural requirements "
             "through pre-defined rules.");
 
+DEFINE_bool(enable_convert_tokens_to_item,
+            false,
+            "Enable token ids conversion to item id in REC/OneRec response.");
+
 DEFINE_int64(dit_cache_start_steps,
              5,
              "The number of steps to skip at the start");
@@ -663,6 +669,18 @@ DEFINE_bool(enable_return_mm_full_embeddings,
             false,
             "return vit and sequence embeddings for vlm models");
 
+DEFINE_bool(enable_output_sku_logprobs,
+            false,
+            "Enable REC / OneRec token-aligned logprobs tensor output.");
+
+DEFINE_int32(each_conversion_threshold,
+             50,
+             "Maximum number of items emitted for each REC token triplet.");
+
+DEFINE_int32(total_conversion_threshold,
+             1000,
+             "Maximum total number of items emitted in one REC response.");
+
 DEFINE_bool(
     use_audio_in_video,
     false,
@@ -692,6 +710,15 @@ DEFINE_int32(max_decode_rounds,
              "0 means disabled.");
 
 DEFINE_int32(beam_width, 1, "Beam width for beam search.");
+
+// --- chat template config ---
+// NOTE: This is an experimental flag,
+//       it needs to be removed after the function is stable.
+DEFINE_bool(use_cpp_chat_template,
+            true,
+            "Use native C++ chat template for supported models "
+            "(e.g. deepseek_v32) instead of Jinja. "
+            "Set to false to fallback to Jinja for debugging.");
 
 // --- health check config ---
 DEFINE_int32(health_check_interval_ms,

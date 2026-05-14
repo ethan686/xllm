@@ -138,8 +138,6 @@ DECLARE_string(kv_cache_transfer_type);
 
 DECLARE_string(kv_cache_transfer_mode);
 
-DECLARE_int32(npu_phy_id);
-
 DECLARE_string(device_ip);
 
 DECLARE_int32(transfer_listen_port);
@@ -163,6 +161,8 @@ DECLARE_bool(enable_atb_spec_kernel);
 DECLARE_bool(enable_block_copy_kernel);
 
 DECLARE_string(etcd_addr);
+
+DECLARE_string(etcd_namespace);
 
 DECLARE_bool(enable_service_routing);
 
@@ -254,6 +254,8 @@ DECLARE_bool(enable_beam_search_kernel);
 
 DECLARE_bool(enable_rec_fast_sampler);
 
+DECLARE_bool(enable_rec_prefill_only);
+
 DECLARE_bool(enable_topk_sorted);
 
 DECLARE_bool(output_rec_logprobs);
@@ -292,6 +294,10 @@ DECLARE_int64(dit_cache_skip_interval_steps);
 DECLARE_double(dit_cache_residual_diff_threshold);
 
 DECLARE_bool(enable_constrained_decoding);
+DECLARE_bool(enable_convert_tokens_to_item);
+DECLARE_bool(enable_output_sku_logprobs);
+DECLARE_int32(each_conversion_threshold);
+DECLARE_int32(total_conversion_threshold);
 
 DECLARE_bool(enable_return_mm_full_embeddings);
 
@@ -329,5 +335,8 @@ DECLARE_string(npu_kernel_backend);
 
 DECLARE_bool(enable_intralayer_addnorm);
 #endif
+
+// --- chat template config ---
+DECLARE_bool(use_cpp_chat_template);
 
 DECLARE_int32(health_check_interval_ms);

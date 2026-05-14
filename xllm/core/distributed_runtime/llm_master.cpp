@@ -67,7 +67,8 @@ LLMMaster::LLMMaster(const Options& options)
     xservice_client_ = XServiceClient::get_instance();
     if (!xservice_client_->init(options_.etcd_addr().value_or(""),
                                 options_.instance_name().value_or(""),
-                                engine_->block_manager_pool())) {
+                                engine_->block_manager_pool(),
+                                options_.etcd_namespace().value_or(""))) {
       LOG(FATAL) << "XServiceClient init fail!";
       return;
     }
@@ -113,7 +114,7 @@ LLMMaster::LLMMaster(const Options& options)
 
   // construct chat template
   chat_template_ =
-      std::make_unique<JinjaChatTemplate>(engine_->tokenizer_args());
+      ChatTemplate::create(engine_->tokenizer_args(), model_args_.model_type());
 
   tokenizer_ = engine_->tokenizer()->clone();
   threadpool_ =

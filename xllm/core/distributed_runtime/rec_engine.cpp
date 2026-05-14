@@ -25,7 +25,7 @@ limitations under the License.
 
 #include "common/global_flags.h"
 #include "common/metrics.h"
-#include "common/rec_model_utils.h"
+#include "framework/kv_cache/kv_cache_shape.h"
 #include "framework/model/model_args.h"
 #include "framework/model_loader.h"
 #include "framework/parallel_state/parallel_state.h"
@@ -34,6 +34,7 @@ limitations under the License.
 #include "util/env_var.h"
 #include "util/net.h"
 #include "util/pretty_print.h"
+#include "util/rec_model_utils.h"
 #include "util/timer.h"
 #include "util/utils.h"
 
@@ -85,6 +86,8 @@ bool RecEngine::init_model() {
   tokenizer_args_ = model_loader->tokenizer_args();
   // Determine rec model kind and create pipeline via factory
   rec_model_kind_ = get_rec_model_kind(args_.model_type());
+  CHECK(rec_model_kind_ != RecModelKind::kNone)
+      << "Unsupported rec model_type: " << args_.model_type();
   auto pipeline_type = get_rec_pipeline_type(rec_model_kind_);
   pipeline_ = create_pipeline(pipeline_type, *this);
   // LlmRec-specific initialization
@@ -126,7 +129,7 @@ bool RecEngine::init_model() {
   return pipeline_->init_model_workers(model_path);
 }
 
-Engine::KVCacheCapacity RecEngine::estimate_kv_cache_capacity() {
+KVCacheCapacity RecEngine::estimate_kv_cache_capacity() {
   const int64_t max_cache_size = options_.max_cache_size();
   const double max_memory_utilization = options_.max_memory_utilization();
 
@@ -139,52 +142,44 @@ Engine::KVCacheCapacity RecEngine::estimate_kv_cache_capacity() {
   }
 
   KVCacheCapacity kv_cache_cap;
-  kv_cache_cap.cache_size_in_bytes = std::max(cache_size_in_bytes, int64_t(0));
-  CHECK_GT(kv_cache_cap.cache_size_in_bytes, 0)
+  kv_cache_cap.cache_size_in_bytes() =
+      std::max(cache_size_in_bytes, int64_t(0));
+  CHECK_GT(kv_cache_cap.cache_size_in_bytes(), 0)
       << "Available kv cache size must be greater than 0";
 
   // compute kv cache slot size
   const int64_t dtype_size = torch::scalarTypeToTypeMeta(dtype_).itemsize();
   const int64_t slot_size = 2 * dtype_size * head_dim_ * n_local_kv_heads_;
-  kv_cache_cap.slot_size = slot_size;
-  kv_cache_cap.n_layers = args_.n_layers();
+  kv_cache_cap.slot_size() = slot_size;
+  kv_cache_cap.n_layers() = args_.n_layers();
+  kv_cache_cap.block_size() = options_.block_size();
 
-  const int32_t block_size = options_.block_size();
+  const int64_t block_size = kv_cache_cap.block_size();
   const int64_t block_size_in_bytes = block_size * slot_size;
-  kv_cache_cap.n_blocks = kv_cache_cap.cache_size_in_bytes /
-                          (args_.n_layers() * block_size_in_bytes);
-  CHECK_GT(kv_cache_cap.n_blocks, 0) << "no n_blocks for kv cache";
+  kv_cache_cap.n_blocks() = kv_cache_cap.cache_size_in_bytes() /
+                            (args_.n_layers() * block_size_in_bytes);
+  CHECK_GT(kv_cache_cap.n_blocks(), 0) << "no n_blocks for kv cache";
 
   return kv_cache_cap;
 }
 
-bool RecEngine::allocate_kv_cache(const Engine::KVCacheCapacity& kv_cache_cap) {
+bool RecEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
   LOG(INFO) << "kv cache capacity: "
-            << "bytes: " << kv_cache_cap.cache_size_in_bytes
-            << ", blocks: " << kv_cache_cap.n_blocks
-            << ", slot_size: " << kv_cache_cap.slot_size;
+            << "bytes: " << kv_cache_cap.cache_size_in_bytes()
+            << ", blocks: " << kv_cache_cap.n_blocks()
+            << ", slot_size: " << kv_cache_cap.slot_size();
 
-  const int32_t block_size = options_.block_size();
+  const int32_t block_size = static_cast<int32_t>(kv_cache_cap.block_size());
+  const int64_t world_size = static_cast<int64_t>(pipeline_->num_workers());
 
   // init kv cache for each worker
-  std::vector<std::vector<int64_t>> kv_cache_shape;
-  kv_cache_shape.reserve(2);
-  kv_cache_shape.emplace_back(std::vector<int64_t>{
-      kv_cache_cap.n_blocks, block_size, n_local_kv_heads_, head_dim_});
-  kv_cache_shape.emplace_back(std::vector<int64_t>{
-      kv_cache_cap.n_blocks, block_size, n_local_kv_heads_, head_dim_});
-#if defined(USE_MLU)
-  for (auto& shape : kv_cache_shape) {
-    std::swap(shape[1], shape[2]);
-  }
-#endif
+  const KVCacheShape kv_cache_shape(kv_cache_cap, args_, world_size);
 
-  LOG(INFO) << "Initializing k cache with shape: [" << kv_cache_shape[0] << "]";
-  LOG(INFO) << "Initializing v cache with shape: [" << kv_cache_shape[1] << "]";
+  kv_cache_shape.print_shapes();
 
   // initialize block manager
   BlockManagerPool::Options options;
-  options.num_blocks(kv_cache_cap.n_blocks)
+  options.num_blocks(kv_cache_cap.n_blocks())
       .host_num_blocks(0)
       .block_size(block_size)
       .enable_prefix_cache(options_.enable_prefix_cache())
@@ -295,7 +290,7 @@ int64_t RecEngine::LlmRecEnginePipeline::estimate_min_available_memory() {
 }
 
 bool RecEngine::LlmRecEnginePipeline::allocate_kv_cache(
-    const std::vector<std::vector<int64_t>>& kv_cache_shape) {
+    const KVCacheShape& kv_cache_shape) {
   std::vector<folly::SemiFuture<bool>> futures;
   futures.reserve(engine_.worker_clients_.size());
   for (auto& worker : engine_.worker_clients_) {
@@ -524,23 +519,36 @@ void RecEngine::OneRecEnginePipeline::process_group_test() {
 bool RecEngine::OneRecEnginePipeline::init_model_workers(
     const std::string& model_path) {
   const auto& devices = engine_.options_.devices();
-  if (devices.size() > 1) {
+  const int32_t world_size = static_cast<int32_t>(devices.size());
+
+  // OneRec local workers still expect valid TP group metadata even on a
+  // single device. For world_size == 1, only rank/world_size metadata is
+  // needed, so avoid creating a real communication backend or extra streams.
+  // For multi-device NPU keep the HCCL-backed groups; other local backends use
+  // the generic local process group creation path.
+  if (world_size == 1) {
+    engine_.process_groups_.clear();
+    engine_.process_groups_.emplace_back(
+        std::make_unique<ProcessGroup>(/*rank=*/0, world_size, devices[0]));
+  }
 #if defined(USE_NPU)
+  else {
     engine_.process_groups_ =
         parallel_state::create_npu_process_groups(devices);
+  }
 #else
+  else {
     engine_.process_groups_ =
         parallel_state::create_local_process_groups(devices, engine_.options_);
-#endif
   }
+#endif
 
   engine_.workers_.clear();
   WorkerType worker_type = WorkerType::REC;
-  const int32_t world_size = static_cast<int32_t>(devices.size());
   for (int32_t rank = 0; rank < world_size; ++rank) {
-    ProcessGroup* pg =
-        world_size > 1 ? engine_.process_groups_[rank].get() : nullptr;
+    ProcessGroup* pg = engine_.process_groups_[rank].get();
     ParallelArgs parallel_args(rank, world_size, pg);
+    parallel_args.tp_group_ = pg;
     engine_.workers_.emplace_back(std::make_unique<Worker>(
         parallel_args, devices[rank], engine_.options_, worker_type));
   }
@@ -598,7 +606,7 @@ int64_t RecEngine::OneRecEnginePipeline::estimate_min_available_memory() {
 }
 
 bool RecEngine::OneRecEnginePipeline::allocate_kv_cache(
-    const std::vector<std::vector<int64_t>>& kv_cache_shape) {
+    const KVCacheShape& kv_cache_shape) {
   std::vector<folly::SemiFuture<bool>> futures;
   futures.reserve(engine_.workers_.size());
   for (auto& worker : engine_.workers_) {
@@ -660,7 +668,10 @@ ForwardOutput RecEngine::OneRecEnginePipeline::step(
     }
 
     timer.reset();
-    batches[0].process_sample_output(decode_output.sample_output, false);
+    batches[0].process_sample_output(
+        decode_output.sample_output,
+        false,
+        /*force_requested_beam_result_size=*/i + 1 == kRecDecodeSteps);
     COUNTER_ADD(rec_sampling_latency_microseconds,
                 timer.elapsed_microseconds());
   }
@@ -690,7 +701,36 @@ ForwardOutput RecEngine::OneRecEnginePipeline::get_model_output(
 
   auto forward_output = results.front().value();
   CHECK(forward_output.has_value()) << "Failed to execute model";
-  return forward_output.value();
+
+  auto& output = forward_output.value();
+  auto& sample_output = output.sample_output;
+
+  if (sample_output.embeddings.defined()) {
+    sample_output.embeddings = safe_to(
+        sample_output.embeddings,
+        torch::TensorOptions().device(torch::kCPU).dtype(torch::kFloat32),
+        /*non_blocking=*/true);
+  }
+
+  if (sample_output.next_tokens.defined()) {
+    sample_output.next_tokens =
+        safe_to(sample_output.next_tokens, torch::kCPU, /*non_blocking=*/true);
+    if (sample_output.logprobs.defined()) {
+      sample_output.logprobs =
+          safe_to(sample_output.logprobs, torch::kCPU, true);
+    }
+    if (sample_output.top_tokens.defined()) {
+      sample_output.top_tokens =
+          safe_to(sample_output.top_tokens, torch::kCPU, true);
+    }
+    if (sample_output.top_logprobs.defined()) {
+      sample_output.top_logprobs =
+          safe_to(sample_output.top_logprobs, torch::kCPU, true);
+    }
+  }
+  Device(engine_.workers_[0]->device()).synchronize_default_stream();
+
+  return output;
 }
 
 std::vector<int64_t>
@@ -835,7 +875,7 @@ RecEngine::RecMultiRoundEnginePipeline::estimate_min_available_memory() {
 }
 
 bool RecEngine::RecMultiRoundEnginePipeline::allocate_kv_cache(
-    const std::vector<std::vector<int64_t>>& kv_cache_shape) {
+    const KVCacheShape& kv_cache_shape) {
   std::vector<folly::SemiFuture<bool>> futures;
   futures.reserve(engine_.workers_.size());
   for (auto& worker : engine_.workers_) {

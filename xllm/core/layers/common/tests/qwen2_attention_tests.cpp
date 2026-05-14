@@ -19,6 +19,7 @@ limitations under the License.
 
 #include <cmath>
 
+#include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_args.h"
 #include "framework/parallel_state/parallel_state.h"
 #include "framework/state_dict/state_dict.h"
@@ -63,7 +64,7 @@ class Qwen2AttentionTest : public ::testing::Test {
     auto v_cache = MakeNoise("qwen2_attention_test.v_cache",
                              {block_num, n_kv_heads, block_size, head_dim},
                              0.01f);
-    kv_cache_ = KVCache(k_cache, v_cache);
+    kv_cache_ = CreateKvCache(k_cache, v_cache);
 
     context_ = ModelContext(parallel_args_, model_args_, QuantArgs(), options_);
     InitTestWeights();
@@ -150,6 +151,28 @@ class Qwen2AttentionTest : public ::testing::Test {
       }
     }
     return torch::tensor(slot_map_vec, options_int);
+  }
+
+  KVCache CreateKvCache(torch::Tensor key_cache,
+                        torch::Tensor value_cache) const {
+    return KVCache(KVCacheTensors{
+        key_cache,
+        value_cache,
+    });
+  }
+
+  KVCache CreateQuantizedKvCache(torch::Tensor key_cache,
+                                 torch::Tensor value_cache,
+                                 torch::Tensor key_cache_scale,
+                                 torch::Tensor value_cache_scale) const {
+    return KVCache(QuantizedKVCacheTensors{
+        KVCacheTensors{
+            key_cache,
+            value_cache,
+        },
+        key_cache_scale,
+        value_cache_scale,
+    });
   }
 
   AttentionMetadata CreateAttentionMetadata(int64_t batch_size,
@@ -403,8 +426,8 @@ TEST_F(Qwen2AttentionTest, QuantizedKVCachePrefillTest) {
                                            torch::kFloat32,
                                            options_.device());
 
-  KVCache quant_kv_cache(
-      k_cache, v_cache, torch::Tensor(), k_cache_scale, v_cache_scale);
+  KVCache quant_kv_cache =
+      CreateQuantizedKvCache(k_cache, v_cache, k_cache_scale, v_cache_scale);
 
   // Create input tensors using seeded tensors
   auto hidden_states = test::seeded_tensor("qwen2_quant_test.hidden_states",
@@ -476,8 +499,10 @@ TEST_F(Qwen2AttentionTest, QuantizedKVCacheDecodeDiagnosticTest) {
             torch::IntArrayRef({block_num, n_kv_heads, block_size}));
   ASSERT_EQ(k_cache_scale.scalar_type(), torch::kFloat32);
 
-  KVCache quant_kv_cache(
-      k_cache, v_cache, torch::Tensor(), k_cache_scale, v_cache_scale);
+  KVCache quant_kv_cache = CreateQuantizedKvCache(std::move(k_cache),
+                                                  std::move(v_cache),
+                                                  std::move(k_cache_scale),
+                                                  std::move(v_cache_scale));
 
   // Create input tensors using seeded tensors
   auto hidden_states = test::seeded_tensor("qwen2_decode_diag.hidden_states",
@@ -552,8 +577,10 @@ TEST_F(Qwen2AttentionTest, QuantizedKVCacheDecodeTest) {
   auto k_cache_scale = 0.5f + k_cache_scale_raw;
   auto v_cache_scale = 0.5f + v_cache_scale_raw;
 
-  KVCache quant_kv_cache(
-      k_cache, v_cache, torch::Tensor(), k_cache_scale, v_cache_scale);
+  KVCache quant_kv_cache = CreateQuantizedKvCache(std::move(k_cache),
+                                                  std::move(v_cache),
+                                                  std::move(k_cache_scale),
+                                                  std::move(v_cache_scale));
 
   // Create input tensors using seeded tensors
   auto hidden_states = test::seeded_tensor("qwen2_quant_decode.hidden_states",
@@ -647,8 +674,10 @@ TEST_F(Qwen2AttentionTest, QuantizedKVCacheChunkedPrefillTest) {
   auto k_cache_scale = 0.5f + k_cache_scale_raw;
   auto v_cache_scale = 0.5f + v_cache_scale_raw;
 
-  KVCache quant_kv_cache(
-      k_cache, v_cache, torch::Tensor(), k_cache_scale, v_cache_scale);
+  KVCache quant_kv_cache = CreateQuantizedKvCache(std::move(k_cache),
+                                                  std::move(v_cache),
+                                                  std::move(k_cache_scale),
+                                                  std::move(v_cache_scale));
 
   auto options_int = options_.dtype(torch::kInt32);
   auto make_seq_offsets = [&](int64_t len) {

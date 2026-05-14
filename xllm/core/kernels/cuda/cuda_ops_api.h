@@ -47,6 +47,14 @@ void reshape_paged_cache(
     torch::Tensor key_cache,  // [n_blocks, block_size, n_heads, head_dim]
     torch::Tensor value_cache);
 
+void block_copy(torch::Tensor key_cache_ptrs,
+                torch::Tensor value_cache_ptrs,
+                torch::Tensor src_block_indices,
+                torch::Tensor dst_block_indices,
+                torch::Tensor cum_sum,
+                int64_t numel_per_block,
+                torch::ScalarType cache_dtype);
+
 void batch_prefill(const std::string& uri,
                    ffi::Array<int64_t> plan_info,
                    torch::Tensor float_workspace_buffer,
@@ -248,4 +256,36 @@ std::tuple<torch::Tensor, torch::Tensor> moe_fused_topk(
     const std::string& scoring_func);
 
 torch::Tensor random_sample(const torch::Tensor& probs);
+
+torch::Tensor cutlass_fused_moe(
+    const torch::Tensor& input,                   // [num_tokens, hidden]
+    const torch::Tensor& token_selected_experts,  // [num_tokens, top_k]
+    const torch::Tensor& token_final_scales,      // [num_tokens, top_k]
+    const torch::Tensor&
+        fc1_expert_weights,  // [num_experts, inter_dim, hidden]
+    const torch::Tensor&
+        fc2_expert_weights,  // [num_experts, hidden, inter_dim]
+    torch::ScalarType output_dtype,
+    const std::vector<torch::Tensor>& quant_scales,
+    int32_t tp_size,
+    int32_t tp_rank,
+    int32_t ep_size,
+    int32_t ep_rank,
+    int32_t cluster_size,
+    int32_t cluster_rank,
+    const std::optional<torch::Tensor>& fc1_expert_biases = std::nullopt,
+    const std::optional<torch::Tensor>& fc2_expert_biases = std::nullopt,
+    const std::optional<torch::Tensor>& input_sf = std::nullopt,
+    const std::optional<torch::Tensor>& swiglu_alpha = std::nullopt,
+    const std::optional<torch::Tensor>& swiglu_beta = std::nullopt,
+    const std::optional<torch::Tensor>& swiglu_limit = std::nullopt,
+    const std::optional<torch::Tensor>& output = std::nullopt,
+    bool enable_alltoall = false,
+    bool use_deepseek_fp8_block_scale = false,
+    bool use_w4_group_scaling = false,
+    bool use_mxfp8_act_scaling = false,
+    bool min_latency_mode = false,
+    bool use_packed_weights = false,
+    int32_t tune_max_num_tokens = 8192,
+    ActivationType activation_type = ActivationType::SWIGLU);
 }  // namespace xllm::kernel::cuda

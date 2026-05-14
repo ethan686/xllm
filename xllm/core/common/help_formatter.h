@@ -71,7 +71,6 @@ const OptionCategory kDisaggregatedPrefillDecodeOptions = {
      "instance_role",
      "kv_cache_transfer_mode",
      "device_ip",
-     "npu_phy_id",
      "transfer_listen_port"}};
 
 const OptionCategory kMultiStepDecodeOptions = {
@@ -90,14 +89,22 @@ const OptionCategory kMtpOptions = {"SPECULATIVE OPTIONS",
                                      "speculative_suffix_max_cached_requests",
                                      "speculative_suffix_use_tree_spec"}};
 
-const OptionCategory kXllmServiceOptions = {"XLLM-SERVICE OPTIONS",
-                                            {"etcd_addr", "rank_tablefile"}};
+const OptionCategory kXllmServiceOptions = {
+    "XLLM-SERVICE OPTIONS",
+    {"etcd_addr", "rank_tablefile", "etcd_namespace"}};
 
-const OptionCategory kBeamSearchOptions = {"BEAM SEARCH OPTIONS",
-                                           {"enable_beam_search_kernel",
-                                            "enable_rec_fast_sampler",
-                                            "enable_topk_sorted",
-                                            "output_rec_logprobs"}};
+const OptionCategory kBeamSearchOptions = {
+    "BEAM SEARCH OPTIONS",
+    {"enable_beam_search_kernel", "enable_topk_sorted"}};
+
+const OptionCategory kRecOptions = {"REC OPTIONS",
+                                    {"enable_rec_fast_sampler",
+                                     "enable_convert_tokens_to_item",
+                                     "enable_output_sku_logprobs",
+                                     "each_conversion_threshold",
+                                     "total_conversion_threshold",
+                                     "enable_rec_prefill_only",
+                                     "output_rec_logprobs"}};
 
 const OptionCategory kPrefixCacheOptions = {
     "PREFIX CACHE OPTIONS",
@@ -123,6 +130,7 @@ const std::vector<OptionCategory> kOptionCategories = {
     kMtpOptions,
     kXllmServiceOptions,
     kBeamSearchOptions,
+    kRecOptions,
     kPrefixCacheOptions,
     kOtherOptions};
 

@@ -45,12 +45,16 @@ class ProcessGroup {
   virtual ~ProcessGroup() = default;
 
   int32_t rank() const {
-    CHECK(pg_ != nullptr) << "Process group is not initialized.";
+    if (pg_ == nullptr) {
+      return rank_;
+    }
     return pg_->getRank();
   }
 
   int32_t world_size() const {
-    CHECK(pg_ != nullptr) << "Process group is not initialized.";
+    if (pg_ == nullptr) {
+      return world_size_;
+    }
     return pg_->getSize();
   }
 
@@ -129,6 +133,8 @@ std::unique_ptr<xllm::ProcessGroup> create_process_group(
     const std::string& group_name,
     const torch::Device& device);
 
+#if defined(USE_NPU) || defined(USE_MLU)
+// for DiT models
 std::unique_ptr<xllm::ProcessGroup> create_process_group(
     int32_t global_rank,
     int32_t local_rank,
@@ -139,5 +145,6 @@ std::unique_ptr<xllm::ProcessGroup> create_process_group(
     const std::string& host,
     const std::string& group_name,
     const torch::Device& device);
+#endif
 
 }  // namespace xllm

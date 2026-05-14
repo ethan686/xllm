@@ -18,6 +18,7 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <algorithm>
+#include <filesystem>
 #include <map>
 #include <memory>
 #include <optional>
@@ -27,10 +28,10 @@ limitations under the License.
 #include "common/device_monitor.h"
 #include "common/global_flags.h"
 #include "common/metrics.h"
-#include "common/rec_model_utils.h"
 #include "common/types.h"
 #include "core/common/global_flags.h"
 #include "framework/model/model_input_params.h"
+#include "util/rec_model_utils.h"
 #if defined(USE_CUDA)
 #include "kernels/cuda/cuda_ops_api.h"
 #include "kernels/cuda/xattention/xattention_ops_api.h"
@@ -42,13 +43,29 @@ limitations under the License.
 #include "kernels/npu/xllm_ops/xllm_ops_api.h"
 #include "platform/npu/device_capture_lock.h"
 #endif
+#include "common/version_singleton.h"
 #include "framework/model_loader.h"
+#include "framework/sampling/rec_constrained_decoding.h"
 #include "framework/sampling/rec_sampler.h"
+#include "framework/state_dict/rec_vocab_dict.h"
 #include "models/model_registry.h"
 #include "util/env_var.h"
 #include "util/timer.h"
 
 namespace xllm {
+
+namespace {
+
+RecVocabDict* get_onerec_vocab_dict(const std::string& model_weights_path) {
+  if (model_weights_path.empty()) {
+    return nullptr;
+  }
+  const std::string model_version =
+      std::filesystem::path(model_weights_path).filename().string();
+  return VersionSingleton<RecVocabDict>::GetInstance(model_version);
+}
+
+}  // namespace
 
 // ============================================================
 // RecWorkerImpl Implementation (base)
@@ -78,32 +95,9 @@ void RecWorkerImpl::RecWorkPipeline::prepare_work_before_execute(
   processed_inputs =
       inputs.to(runtime_.worker.device(), runtime_.worker.dtype());
   auto& input_params = processed_inputs.input_params;
+  runtime_.worker.apply_kv_block_swaps(input_params);
+
 #if defined(USE_NPU)
-  if (input_params.swap_blocks.size() > 0 && !FLAGS_enable_block_copy_kernel) {
-    auto& swap_blocks = input_params.swap_blocks;
-
-    // collect src and dst indices
-    std::vector<int64_t> src_indices, dst_indices;
-    src_indices.reserve(swap_blocks.size());
-    dst_indices.reserve(swap_blocks.size());
-
-    for (const auto& block : swap_blocks) {
-      src_indices.push_back(block.src_block_id);
-      dst_indices.push_back(block.dst_block_id);
-    }
-
-    // batch select keys and values
-    auto src_tensor = torch::tensor(
-        src_indices,
-        torch::dtype(torch::kLong).device(runtime_.worker.device_));
-    auto dst_tensor = torch::tensor(
-        dst_indices,
-        torch::dtype(torch::kLong).device(runtime_.worker.device_));
-    const int64_t num_layers = runtime_.context->get_model_args().n_layers();
-    for (int layer_id = 0; layer_id < num_layers; layer_id++) {
-      runtime_.worker.kv_caches_[layer_id].swap_blocks(src_tensor, dst_tensor);
-    }
-  }
   if (runtime_.context->get_model_args().enable_mla() &&
       input_params.batch_forward_type.is_chunked_prefill()) {
     runtime_.worker.prepare_mla_prefixcache_inputs(input_params);
@@ -149,6 +143,12 @@ std::optional<ForwardOutput> RecWorkerImpl::RecWorkPipeline::step(
     std::shared_ptr<NPULayerSynchronizerImpl> layer_synchronizer =
         std::make_shared<NPULayerSynchronizerImpl>(
             runtime_.context->get_model_args().n_layers());
+#elif defined(USE_MLU)
+    std::shared_ptr<MLULayerSynchronizerImpl> layer_synchronizer =
+        std::make_shared<MLULayerSynchronizerImpl>(
+            runtime_.context->get_model_args().n_layers());
+#endif
+#if defined(USE_NPU) || defined(USE_MLU)
     const_cast<ModelInputParams*>(&(input.input_params))->layer_synchronizer =
         layer_synchronizer;
 
@@ -280,6 +280,34 @@ void RecWorkerImpl::LlmRecWorkPipeline::prepare_work_before_execute(
   runtime_.worker.prepare_multi_modal_data(processed_inputs);
 }
 
+RecWorkerImpl::OneRecWorkPipeline::OneRecWorkPipeline(
+    RecPipelineRuntime& runtime)
+    : RecWorkPipeline(runtime),
+      rec_sampler_(
+          std::make_unique<RecSampler>(RecPipelineType::kOneRecDefault)),
+      filter_mask_threadpool_(std::make_unique<ThreadPool>(1)) {
+  if (!FLAGS_enable_constrained_decoding) {
+    return;
+  }
+
+  auto* vocab_dict = get_onerec_vocab_dict(runtime_.worker.model_weights_path_);
+  CHECK(vocab_dict != nullptr)
+      << "Failed to get RecVocabDict for OneRec constrained decoding, "
+      << "model_path=" << runtime_.worker.model_weights_path_;
+
+  const int32_t vocab_size =
+      static_cast<int32_t>(runtime_.context->get_model_args().vocab_size());
+  constrained_decoding_ =
+      std::make_unique<RecConstrainedDecoding>(vocab_dict,
+                                               vocab_size,
+                                               runtime_.worker.dtype(),
+                                               runtime_.worker.device(),
+                                               /*use_gen_threadpool=*/false);
+  CHECK(constrained_decoding_->build_mask_cache())
+      << "Failed to build OneRec constrained decoding cache, vocab_size="
+      << vocab_size;
+}
+
 ForwardInput RecWorkerImpl::OneRecWorkPipeline::prepare_inputs(Batch& batch) {
   ThreadPool* thread_pool =
       runtime_.worker.input_builder_thread_pool_
@@ -291,6 +319,63 @@ ForwardInput RecWorkerImpl::OneRecWorkPipeline::prepare_inputs(Batch& batch) {
       /*min_decoding_batch_size=*/0,
       runtime_.context->get_model_args(),
       thread_pool);
+}
+
+void RecWorkerImpl::OneRecWorkPipeline::prepare_work_before_execute(
+    const ForwardInput& inputs,
+    ForwardInput& processed_inputs) {
+  RecWorkPipeline::prepare_work_before_execute(inputs, processed_inputs);
+
+  auto& onerec_params = processed_inputs.input_params.mutable_onerec_params();
+  if (!onerec_params.decoder_context_embedding.defined()) {
+    return;
+  }
+
+  if (onerec_params.decoder_context_embedding.scalar_type() ==
+      runtime_.worker.dtype()) {
+    return;
+  }
+
+  onerec_params.decoder_context_embedding =
+      onerec_params.decoder_context_embedding.to(runtime_.worker.dtype());
+}
+
+folly::SemiFuture<torch::Tensor>
+RecWorkerImpl::OneRecWorkPipeline::prepare_filter_mask_async(
+    const std::vector<std::vector<int32_t>>& generated_tokens) {
+  folly::Promise<torch::Tensor> promise;
+  auto future = promise.getSemiFuture();
+
+  if (!constrained_decoding_ || !filter_mask_threadpool_ ||
+      generated_tokens.empty()) {
+    promise.setValue(torch::Tensor());
+    return future;
+  }
+
+  filter_mask_threadpool_->schedule(
+      [this, generated_tokens, promise = std::move(promise)]() mutable {
+        try {
+          auto filter_mask =
+              constrained_decoding_->generate_mask(generated_tokens);
+          promise.setValue(filter_mask);
+        } catch (const std::exception& e) {
+          const int32_t batch = static_cast<int32_t>(generated_tokens.size());
+          const int32_t seq =
+              batch > 0 ? static_cast<int32_t>(generated_tokens[0].size()) : 0;
+          LOG(ERROR) << "Failed to generate OneRec filter mask, batch=" << batch
+                     << ", seq=" << seq << ", error=" << e.what();
+          promise.setValue(torch::Tensor());
+        } catch (...) {
+          const int32_t batch = static_cast<int32_t>(generated_tokens.size());
+          const int32_t seq =
+              batch > 0 ? static_cast<int32_t>(generated_tokens[0].size()) : 0;
+          LOG(ERROR) << "Failed to generate OneRec filter mask, batch=" << batch
+                     << ", seq=" << seq << ", error=unknown";
+          promise.setValue(torch::Tensor());
+        }
+      });
+
+  return future;
 }
 
 std::optional<ForwardOutput> RecWorkerImpl::OneRecWorkPipeline::step(
@@ -305,10 +390,24 @@ std::optional<ForwardOutput> RecWorkerImpl::OneRecWorkPipeline::step(
   CHECK(onerec_params != nullptr) << "OneRec requires rec_params.";
 
   const OneRecModelInputParams& rec_params = *onerec_params;
+  const bool has_decoder_context =
+      rec_params.decoder_context_embedding.defined();
+  const bool has_encoder_context =
+      rec_params.has_encoder_output || has_decoder_context;
+  std::optional<folly::SemiFuture<torch::Tensor>> filter_mask_future;
+  if ((runtime_.worker.driver_ || runtime_.worker.dp_driver_) &&
+      FLAGS_enable_constrained_decoding && constrained_decoding_ != nullptr &&
+      sampling_params.selected_token_idxes.defined()) {
+    filter_mask_future = prepare_filter_mask_async(rec_params.generated_tokens);
+  }
 
   torch::Tensor hidden_states;
   if (rec_params.rec_stage == OneRecModelInputParams::RecStage::PREFILL) {
     if (!rec_params.is_first_prefill) {
+      if (!has_encoder_context) {
+        LOG(ERROR) << "OneRec prefill requires encoder context.";
+        return std::nullopt;
+      }
       ModelInputParams decoder_params = input_params;
       decoder_params.mutable_onerec_params().is_encoder_forward = false;
       decoder_params.mutable_onerec_params().has_encoder_output =
@@ -353,11 +452,6 @@ std::optional<ForwardOutput> RecWorkerImpl::OneRecWorkPipeline::step(
       decoder_onerec_params.is_encoder_forward = false;
       decoder_onerec_params.has_encoder_output =
           encoder_output.hidden_states.defined();
-      if (encoder_output.hidden_states.defined() &&
-          !decoder_onerec_params.decoder_context_embedding.defined()) {
-        decoder_onerec_params.decoder_context_embedding =
-            encoder_output.hidden_states;
-      }
       auto model_output = runtime_.executor->forward(input.token_ids,
                                                      input.positions,
                                                      runtime_.worker.kv_caches_,
@@ -365,6 +459,10 @@ std::optional<ForwardOutput> RecWorkerImpl::OneRecWorkPipeline::step(
       hidden_states = model_output.hidden_states;
     }
   } else {
+    if (!has_encoder_context) {
+      LOG(ERROR) << "OneRec decode requires encoder context.";
+      return std::nullopt;
+    }
     ModelInputParams decoder_params = input_params;
     decoder_params.mutable_onerec_params().is_encoder_forward = false;
     decoder_params.mutable_onerec_params().has_encoder_output =
@@ -398,8 +496,12 @@ std::optional<ForwardOutput> RecWorkerImpl::OneRecWorkPipeline::step(
   ForwardOutput output;
 
   if (sampling_params.selected_token_idxes.defined()) {
+    torch::Tensor filter_mask;
+    if (filter_mask_future.has_value()) {
+      filter_mask = std::move(filter_mask_future.value()).get();
+    }
     auto sample_output =
-        runtime_.worker.sampler_->forward(logits, sampling_params);
+        rec_sampler_->forward(logits, sampling_params, filter_mask);
     output.logits = logits;
     output.sample_output = sample_output;
     output.do_sample = sampling_params.do_sample;
@@ -413,78 +515,6 @@ std::optional<ForwardOutput> RecWorkerImpl::OneRecWorkPipeline::step(
       runtime_.worker.device_.index());
 
   return output;
-}
-
-// ============================================================
-// LlmRecWithMmDataWorkPipeline Implementation (qwen3 with embedding)
-// ============================================================
-
-void RecWorkerImpl::LlmRecWithMmDataWorkPipeline::prepare_work_before_execute(
-    const ForwardInput& inputs,
-    ForwardInput& processed_inputs) {
-  RecWorkPipeline::prepare_work_before_execute(inputs, processed_inputs);
-
-  if (!inputs.input_params.mm_data.valid()) {
-    return;
-  }
-
-  torch::Tensor input_embedding;
-  torch::Tensor input_tokens_tensor;
-  torch::Tensor input_indices_tensor;
-
-  const auto& mm_data = inputs.input_params.mm_data;
-  const auto& processed_mm_data = processed_inputs.input_params.mm_data;
-
-  if (auto res = processed_mm_data.get<torch::Tensor>(LLM_REC_INPUT_TOKENS)) {
-    input_tokens_tensor = res.value();
-  }
-
-  // Input indices are generated on host side.
-  if (auto res = mm_data.get<torch::Tensor>(LLM_REC_INPUT_INDICES)) {
-    input_indices_tensor = res.value();
-  }
-
-  if (auto res =
-          processed_mm_data.get<torch::Tensor>(LLM_REC_INPUT_EMBEDDING)) {
-    input_embedding = res.value();
-  }
-
-  if (input_embedding.defined()) {
-    input_embedding = input_embedding.to(runtime_.worker.dtype());
-  }
-
-  if (input_indices_tensor.defined()) {
-    CHECK(input_tokens_tensor.defined())
-        << "LLM_REC_INPUT_TOKENS is required when LLM_REC_INPUT_INDICES is "
-           "set.";
-
-#if defined(USE_NPU)
-    layer::NpuWordEmbedding npu_word_embedding =
-        runtime_.worker.get_npu_word_embedding();
-    torch::Tensor input_tokens_embedding =
-        npu_word_embedding(input_tokens_tensor, 0);
-#else
-    layer::WordEmbedding word_embedding = runtime_.worker.get_word_embedding();
-    torch::Tensor input_tokens_embedding =
-        word_embedding->forward(input_tokens_tensor);
-#endif
-
-    if (input_embedding.defined()) {
-      torch::Tensor input_indices_cpu =
-          input_indices_tensor.to(torch::kCPU).to(torch::kInt64).contiguous();
-      const auto* input_indices_ptr = input_indices_cpu.data_ptr<int64_t>();
-      std::vector<int64_t> input_indices(
-          input_indices_ptr, input_indices_ptr + input_indices_cpu.numel());
-
-      processed_inputs.input_params.input_embedding =
-          runtime_.worker.merge_embeddings_by_indices(
-              input_tokens_embedding, input_embedding, input_indices);
-    } else {
-      processed_inputs.input_params.input_embedding = input_tokens_embedding;
-    }
-  } else if (input_embedding.defined()) {
-    processed_inputs.input_params.input_embedding = input_embedding;
-  }
 }
 
 // ============================================================
@@ -827,17 +857,8 @@ std::optional<ForwardOutput> RecWorkerImpl::LlmRecMultiRoundPipeline::step(
           << ")";
 
 #if defined(USE_NPU)
-      if (round == 0) {
-        // NPU beam_search_rec prefill only accepts top_k == 1. Flatten the
-        // sampler's per-request top-k output into one candidate per beam so
-        // the kernel can seed sequence_group without discarding beam diversity.
-        top_tokens =
-            sample_output.top_tokens.to(torch::kInt32).reshape({-1, 1});
-        top_logprobs = sample_output.top_logprobs.reshape({-1, 1});
-      } else {
-        top_tokens = sample_output.top_tokens.to(torch::kInt32);
-        top_logprobs = sample_output.top_logprobs;
-      }
+      top_tokens = sample_output.top_tokens.to(torch::kInt32);
+      top_logprobs = sample_output.top_logprobs;
 #else
       top_tokens = sample_output.top_tokens.to(torch::kInt32)
                        .reshape({-1, step_meta->beam_width});
@@ -895,18 +916,25 @@ void RecWorkerImpl::LlmRecMultiRoundPipeline::execute_beam_search(
     int32_t round,
     int32_t batch_size) {
 #if defined(USE_NPU)
-  xllm::kernel::npu::beam_search_rec(
-      /*logprobs=*/beam_tensors.acc_logprob,
-      /*top_tokens=*/top_tokens.to(torch::kInt32),
-      /*top_logprobs=*/top_logprobs,
-      /*sequence_group=*/beam_tensors.sequence_group,
-      /*current_step=*/static_cast<int64_t>(round),
-      /*out_token_ids=*/beam_tensors.out_token_ids,
-      /*out_token_index=*/beam_tensors.out_token_index,
-      /*out_log_probs=*/beam_tensors.out_log_probs,
-      /*out_beam_count_prefix_sums=*/
-      beam_tensors.out_beam_count_prefix_sums,
-      /*out_sequence=*/beam_tensors.out_seqgroup);
+  if (round == 0) {
+    beam_tensors.out_token_ids.copy_(top_tokens.reshape({-1, 1}));
+    beam_tensors.out_log_probs.copy_(top_logprobs.reshape({-1, 1}));
+    beam_tensors.out_seqgroup.select(/*dim=*/2, /*index=*/0)
+        .copy_(top_tokens.reshape({-1}));
+  } else {
+    xllm::kernel::npu::beam_search_rec(
+        /*logprobs=*/beam_tensors.acc_logprob,
+        /*top_tokens=*/top_tokens,
+        /*top_logprobs=*/top_logprobs,
+        /*sequence_group=*/beam_tensors.sequence_group,
+        /*current_step=*/static_cast<int64_t>(round),
+        /*out_token_ids=*/beam_tensors.out_token_ids,
+        /*out_token_index=*/beam_tensors.out_token_index,
+        /*out_log_probs=*/beam_tensors.out_log_probs,
+        /*out_beam_count_prefix_sums=*/
+        beam_tensors.out_beam_count_prefix_sums,
+        /*out_sequence=*/beam_tensors.out_seqgroup);
+  }
 #elif defined(USE_CUDA)
   xllm::kernel::cuda::beam_search(beam_tensors.acc_logprob,
                                   beam_tensors.sequence_group,
@@ -1664,47 +1692,6 @@ std::unique_ptr<RecWorkerImpl::RecWorkPipeline> RecWorkerImpl::create_pipeline(
                  << static_cast<int>(type);
       return nullptr;
   }
-}
-
-torch::Tensor RecWorkerImpl::merge_embeddings_by_indices(
-    const torch::Tensor& input_tokens_embedding,
-    const torch::Tensor& input_embedding,
-    const std::vector<int64_t>& input_indices) {
-  CHECK_EQ(input_embedding.dim(), 2);
-  CHECK_EQ(input_tokens_embedding.dim(), 2);
-  CHECK_EQ(input_tokens_embedding.size(1), input_embedding.size(1));
-  CHECK_EQ(input_tokens_embedding.dtype(), input_embedding.dtype());
-  CHECK_EQ(input_tokens_embedding.device(), input_embedding.device());
-
-  const int64_t total_rows =
-      input_tokens_embedding.size(0) + input_embedding.size(0);
-  const int64_t cols = input_embedding.size(1);
-
-  torch::Device device = input_embedding.device();
-  torch::Tensor merged = torch::empty(
-      {total_rows, cols}, torch::dtype(input_embedding.dtype()).device(device));
-
-  std::vector<int64_t> input_embedding_indices;
-  for (int64_t i = 0; i < total_rows; ++i) {
-    if (std::find(input_indices.begin(), input_indices.end(), i) ==
-        input_indices.end()) {
-      input_embedding_indices.push_back(i);
-    }
-  }
-
-  CHECK_EQ(input_embedding_indices.size(), input_embedding.size(0));
-
-  torch::Tensor input_embedding_indices_tensor =
-      torch::tensor(input_embedding_indices, torch::kInt64).to(device);
-  merged.index_put_({input_embedding_indices_tensor, torch::indexing::Ellipsis},
-                    input_embedding);
-
-  torch::Tensor input_indices_tensor =
-      torch::tensor(input_indices, torch::kInt64).to(device);
-  merged.index_put_({input_indices_tensor, torch::indexing::Ellipsis},
-                    input_tokens_embedding);
-
-  return merged;
 }
 
 }  // namespace xllm

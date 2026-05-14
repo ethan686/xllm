@@ -31,13 +31,14 @@ constexpr uint64_t MBUF_SIZE = 128 * 1024 * 1024;
 namespace {
 runtime::Options MTPTargetOptions(const runtime::Options& options) {
   auto opts = options;
-  opts.enable_schedule_overlap(false);
+  opts.enable_schedule_overlap(false).is_draft_engine(false);
   return opts;
 }
 
 runtime::Options MTPDraftOptions(const runtime::Options& options) {
   auto opts = options;
   opts.enable_schedule_overlap(false)
+      .is_draft_engine(true)
       .num_decoding_tokens(1)
       .num_speculative_tokens(0);
   return opts;
@@ -112,9 +113,8 @@ int64_t MTPWorkerImpl::get_embedding_placeholder_size() {
   return static_cast<int64_t>(embedding_size_);
 }
 
-bool MTPWorkerImpl::allocate_kv_cache(
-    const std::vector<std::vector<int64_t>>& kv_cache_shape) {
-  const int64_t num_blocks = kv_cache_shape[0][0];
+bool MTPWorkerImpl::allocate_kv_cache(const KVCacheShape& kv_cache_shape) {
+  const int64_t num_blocks = kv_cache_shape.key_cache_shape()[0];
   // init_model() must run first so dtype_/embedding_size_ are initialized.
   embedding_cache_ = std::make_shared<EmbeddingCache>(num_blocks);
   if (embedding_cache_) {
@@ -148,7 +148,8 @@ bool MTPWorkerImpl::allocate_kv_cache(
 
 #if defined(USE_NPU)
 bool MTPWorkerImpl::allocate_kv_cache_with_transfer(
-    const std::vector<std::vector<int64_t>>& kv_cache_shape) {
+    const KVCacheShape& kv_cache_shape) {
+  const int64_t num_blocks = kv_cache_shape.key_cache_shape()[0];
   CHECK(impl_ != nullptr);
   CHECK(draft_impl_ != nullptr);
 
@@ -181,7 +182,7 @@ bool MTPWorkerImpl::allocate_kv_cache_with_transfer(
     CHECK_EQ(draft_status, WorkerImpl::Status::READY);
   }
 
-  embedding_cache_ = std::make_shared<EmbeddingCache>(kv_cache_shape[0][0]);
+  embedding_cache_ = std::make_shared<EmbeddingCache>(num_blocks);
   if (embedding_cache_) {
     int64_t size = get_embedding_placeholder_size();
     if (size > 0) {
@@ -507,6 +508,16 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
 
 void MTPWorkerImpl::process_draft_sample_output(SampleOutput& sample_output) {
   if (sample_output.probs.defined()) {
+    CHECK(sample_output.next_tokens.defined())
+        << "draft sample_output.next_tokens must be defined when probs exist";
+    CHECK_EQ(sample_output.next_tokens.dim(), 1)
+        << "MTP draft cache expects next_tokens [batch], got "
+        << sample_output.next_tokens.sizes();
+    CHECK(sample_output.probs.dim() == 1 || sample_output.probs.dim() == 2)
+        << "MTP draft cache expects probs [batch] or [batch,vocab], got "
+        << sample_output.probs.sizes();
+    CHECK_EQ(sample_output.probs.size(0), sample_output.next_tokens.size(0))
+        << "MTP draft cache probs/token batch mismatch";
     // Cache always stores selected-only draft probs [batch_size] to reduce HBM.
     sample_output.probs = specBuilder::draftProbs::compress_for_cache(
         sample_output.probs, sample_output.next_tokens);

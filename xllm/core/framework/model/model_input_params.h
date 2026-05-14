@@ -26,11 +26,14 @@ limitations under the License.
 #if defined(USE_NPU)
 #include "platform/npu/npu_layer_synchronizer.h"
 #endif
+#if defined(USE_MLU)
+#include "platform/mlu/mlu_layer_synchronizer.h"
+#endif
 #include "framework/batch/batch_forward_type.h"
+#include "framework/parallel_state/npu_cp_ep_padding.h"
+#include "framework/parallel_state/npu_cp_prepare.h"
+#include "framework/parallel_state/npu_dp_ep_padding.h"
 #include "framework/request/mm_batch_data.h"
-#include "npu_cp_ep_padding.h"
-#include "npu_cp_prepare.h"
-#include "npu_dp_ep_padding.h"
 #include "runtime/dit_forward_params.h"
 #include "util/hash_util.h"
 #include "util/tensor_helper.h"
@@ -65,7 +68,7 @@ struct OneRecModelInputParams {
   torch::Tensor cross_attn_kv_cu_seq_lens;
   torch::Tensor cross_attn_new_cache_slots;
   torch::Tensor cross_attn_block_tables;
-  std::vector<int> cross_attn_kv_cu_seq_lens_vec;
+  std::vector<int32_t> cross_attn_kv_cu_seq_lens_vec;
 
   torch::Tensor encoder_token_ids;
   torch::Tensor encoder_positions;
@@ -339,11 +342,12 @@ struct ModelInputParams {
     params.num_sequences = num_sequences;
     params.kv_max_seq_len = kv_max_seq_len;
     params.q_max_seq_len = q_max_seq_len;
-    params.enable_mla = enable_mla;
 
     params.kv_seq_lens = safe_to(kv_seq_lens, device, true);
     params.q_seq_lens = safe_to(q_seq_lens, device, true);
+#if !defined(USE_CUDA)
     params.q_cu_seq_lens = safe_to(q_cu_seq_lens, device, true);
+#endif
 
     params.new_cache_slots = safe_to(new_cache_slots, device, true);
     params.block_tables = safe_to(block_tables, device, true);
@@ -358,6 +362,8 @@ struct ModelInputParams {
     params.dp_global_token_nums = dp_global_token_nums;
     params.dp_is_decode = dp_is_decode;
     params.embedding_ids = std::move(embedding_ids);
+    params.linear_state_ids = std::move(linear_state_ids);
+    params.linear_state_indices = safe_to(linear_state_indices, device, true);
     params.request_ids = std::move(request_ids);
     params.extra_token_ids = std::move(extra_token_ids);
     params.dp_ep_padding_data = dp_ep_padding_data;
@@ -385,7 +391,7 @@ struct ModelInputParams {
     params.ring_cur_seqlen_host = ring_cur_seqlen_host;
     params.ring_cache_seqlen = safe_to(ring_cache_seqlen, device);
     params.ring_cache_seqlen_host = ring_cache_seqlen_host;
-#if defined(USE_NPU)
+#if defined(USE_NPU) || defined(USE_MLU)
     params.layer_synchronizer = layer_synchronizer;
 #endif
     params.expert_load_data = expert_load_data;
@@ -475,13 +481,23 @@ struct ModelInputParams {
         return false;
       }
     }
+#else
+    (void)layer_idx;
 #endif
     return true;
   }
 
-  // Compatibility fallback for metadata builders that are not wired with
-  // ModelArgs yet.
-  bool enable_mla = false;
+  bool record_layer(uint32_t layer_idx, const torch::Device& device) const {
+#if defined(USE_MLU)
+    if (layer_synchronizer != nullptr) {
+      return layer_synchronizer->record_current(layer_idx, device.index());
+    }
+#else
+    (void)layer_idx;
+    (void)device;
+#endif
+    return true;
+  }
 
   BatchForwardType batch_forward_type;
 
@@ -492,7 +508,7 @@ struct ModelInputParams {
   int32_t kv_max_seq_len = 0;
   int32_t q_max_seq_len = 0;
 
-  uint64_t batch_id;
+  uint64_t batch_id = 0;
 
   torch::Tensor q_seq_lens;
   torch::Tensor kv_seq_lens;
@@ -540,6 +556,12 @@ struct ModelInputParams {
   // embedding ids of each sequence
   std::vector<int32_t> embedding_ids;
 
+  // linear state ids of each sequence
+  std::vector<int32_t> linear_state_ids;
+
+  // IntTensor: [n_seq]
+  torch::Tensor linear_state_indices;
+
   // request ids of each sequence, used by suffix decoding request identity
   std::vector<std::string> request_ids;
 
@@ -563,7 +585,9 @@ struct ModelInputParams {
   // visual pos mask for Qwen3-VL
   mutable torch::Tensor visual_pos_masks;
 
-#if defined(USE_NPU)
+#if defined(USE_MLU)
+  std::shared_ptr<MLULayerSynchronizerImpl> layer_synchronizer = nullptr;
+#elif defined(USE_NPU)
   std::shared_ptr<NPULayerSynchronizerImpl> layer_synchronizer = nullptr;
   uint32_t layers_per_bacth_copy = std::numeric_limits<uint32_t>::max();
   std::shared_ptr<NPULayerSynchronizerImpl> layer_wise_load_synchronizer =
