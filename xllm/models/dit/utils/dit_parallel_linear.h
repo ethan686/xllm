@@ -127,26 +127,6 @@ struct TpOptions {
   }
 };
 
-// ── DiTParallelLinear ──────────────────────────────────────────────────────
-//
-// A unified parallel linear layer supporting three modes:
-//
-//   Default          — standard single-device linear
-//   (AddMatmulWeightTransposed) SequenceParallel — linear + all2all (Ulysses)
-//   TensorParallel   — sharded weights + gather/reduce (Megatron-LM)
-//
-// Construction:
-//   1) Pre-built linear:  DiTParallelLinear(linear, name, type, sp_opts)
-//      — used by models that manage their own weight layout (e.g. QwenImage)
-//
-//   2) Auto-created:      DiTParallelLinear(in, out, bias, opts, type,
-//                                             sp_opts, tp_opts)
-//      — creates AddMatmulWeightTransposed internally for Default/SP,
-//        or sharded weight/bias tensors for TP
-//
-//   3) Factory:           DiTParallelLinearFactory::create(...)
-//      — convenience wrapper for constructor (2)
-
 class DiTParallelLinearImpl : public torch::nn::Module {
  public:
   // Default constructor (required by TORCH_MODULE)
@@ -180,7 +160,6 @@ class DiTParallelLinearImpl : public torch::nn::Module {
     }
   }
 
-  // ── Constructor: auto-created (Wan2.2-compatible) ──
   DiTParallelLinearImpl(
       int64_t in_features,
       int64_t out_features,
@@ -225,7 +204,6 @@ class DiTParallelLinearImpl : public torch::nn::Module {
     }
   }
 
-  // ── Forward ──
   torch::Tensor forward(const torch::Tensor& input) {
     switch (linear_type_) {
       case LinearType::Default:
