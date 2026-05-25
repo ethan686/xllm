@@ -25,6 +25,7 @@ limitations under the License.
 #include "core/framework/request/dit_request_state.h"
 #include "core/framework/state_dict/state_dict.h"
 #include "core/framework/state_dict/utils.h"
+#include "framework/parallel_state/parallel_state.h"
 #include "models/model_registry.h"
 #include "transformer_wan2_2.h"
 #include "umt5_encoder.h"
@@ -35,7 +36,8 @@ namespace xllm {
 
 class Wan2_2I2VPipelineImpl : public torch::nn::Module {
  public:
-  Wan2_2I2VPipelineImpl(const DiTModelContext& context) {
+  Wan2_2I2VPipelineImpl(const DiTModelContext& context)
+      : parallel_args_(context.get_parallel_args()) {
     options_ = context.get_tensor_options();
     const auto& vae_args = context.get_model_args("vae");
     zdim_ = vae_args.z_dim();
@@ -49,8 +51,14 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
 
     LOG(INFO) << "Initializing Wan2_2I2V pipeline...";
     vae_ = AutoencoderKLWan(context.get_model_context("vae"));
-    transformer_ = Wan22DiTModel(context.get_model_context("transformer"));
-    transformer_2_ = Wan22DiTModel(context.get_model_context("transformer_2"));
+    std::cerr << "[DEBUG] Pipeline: creating transformer_" << std::endl;
+    transformer_ = Wan22DiTModel(context.get_model_context("transformer"),
+                                 context.get_parallel_args());
+    std::cerr << "[DEBUG] Pipeline: transformer_ created" << std::endl;
+    std::cerr << "[DEBUG] Pipeline: creating transformer_2_" << std::endl;
+    transformer_2_ = Wan22DiTModel(context.get_model_context("transformer_2"),
+                                   context.get_parallel_args());
+    std::cerr << "[DEBUG] Pipeline: transformer_2_ created" << std::endl;
     umt5_ = UMT5EncoderModel(context.get_model_context("text_encoder"));
     scheduler_ =
         UniPCMultistepScheduler(context.get_model_context("scheduler"));
@@ -430,6 +438,12 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
                               /*mu=*/std::nullopt,
                               /*shift=*/5.0f);
     torch::Tensor timesteps = scheduler_->timesteps();
+    std::cerr << "[DIAG] timesteps: num=" << timesteps.numel() << " values=[";
+    for (int64_t j = 0; j < std::min(timesteps.numel(), (int64_t)5); ++j) {
+      if (j > 0) std::cerr << ", ";
+      std::cerr << timesteps[j].item<float>();
+    }
+    std::cerr << "]" << std::endl;
 
     int64_t num_channels_latents = zdim_;
     torch::Tensor input_image;
@@ -520,25 +534,83 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
         }
       }
 
-      torch::Tensor noise_pred = current_model->forward(false,
-                                                        i,
-                                                        latent_model_input,
-                                                        timestep_input,
-                                                        encoded_prompt_embeds,
-                                                        torch::Tensor());
+      torch::Tensor noise_pred;
       if (do_classifier_free_guidance) {
-        torch::Tensor noise_uncond =
-            current_model->forward(true,
-                                   i,
-                                   latent_model_input,
-                                   timestep_input,
-                                   encoded_negative_embeds,
-                                   torch::Tensor());
+        torch::Tensor noise_uncond;
+        if (FLAGS_cfg_size == 2) {
+          auto rank = parallel_args_.dit_cfg_group_->rank();
+          if (rank == 0) {
+            noise_pred = current_model->forward(false,
+                                                i,
+                                                latent_model_input,
+                                                timestep_input,
+                                                encoded_prompt_embeds,
+                                                torch::Tensor());
+          } else {
+            noise_pred = current_model->forward(true,
+                                                i,
+                                                latent_model_input,
+                                                timestep_input,
+                                                encoded_negative_embeds,
+                                                torch::Tensor());
+          }
+          auto gathered = xllm::parallel_state::gather(
+              noise_pred, parallel_args_.dit_cfg_group_, /*dim=*/0);
+          auto chunks = torch::chunk(gathered, 2, 0);
+          noise_pred = chunks[0];
+          noise_uncond = chunks[1];
+        } else {
+          noise_pred = current_model->forward(false,
+                                              i,
+                                              latent_model_input,
+                                              timestep_input,
+                                              encoded_prompt_embeds,
+                                              torch::Tensor());
+          noise_uncond = current_model->forward(true,
+                                                i,
+                                                latent_model_input,
+                                                timestep_input,
+                                                encoded_negative_embeds,
+                                                torch::Tensor());
+        }
         noise_pred = noise_uncond.to(torch::kFloat32) +
                      static_cast<float>(current_guidance) *
                          (noise_pred.to(torch::kFloat32) -
                           noise_uncond.to(torch::kFloat32));
         noise_uncond.reset();
+      } else {
+        noise_pred = current_model->forward(false,
+                                            i,
+                                            latent_model_input,
+                                            timestep_input,
+                                            encoded_prompt_embeds,
+                                            torch::Tensor());
+      }
+
+      if (i == 0) {
+        auto np_f32 = noise_pred.to(torch::kFloat32);
+        std::cerr << "[DIAG] noise_pred step0: shape=" << noise_pred.sizes()
+                  << " dtype=" << noise_pred.dtype()
+                  << " mean=" << np_f32.mean().item<float>()
+                  << " std=" << np_f32.std().item<float>()
+                  << " min=" << np_f32.min().item<float>()
+                  << " max=" << np_f32.max().item<float>() << std::endl;
+        auto li_f32 = latent_model_input.to(torch::kFloat32);
+        std::cerr << "[DIAG] latent_input step0: shape="
+                  << latent_model_input.sizes()
+                  << " dtype=" << latent_model_input.dtype()
+                  << " mean=" << li_f32.mean().item<float>()
+                  << " std=" << li_f32.std().item<float>()
+                  << " min=" << li_f32.min().item<float>()
+                  << " max=" << li_f32.max().item<float>() << std::endl;
+        auto pe_f32 = encoded_prompt_embeds.to(torch::kFloat32);
+        std::cerr << "[DIAG] prompt_embeds: shape="
+                  << encoded_prompt_embeds.sizes()
+                  << " dtype=" << encoded_prompt_embeds.dtype()
+                  << " mean=" << pe_f32.mean().item<float>()
+                  << " std=" << pe_f32.std().item<float>()
+                  << " min=" << pe_f32.min().item<float>()
+                  << " max=" << pe_f32.max().item<float>() << std::endl;
       }
 
       auto prev_latents = scheduler_->step(noise_pred, t, prepared_latents);
@@ -574,10 +646,17 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
     torch::Tensor latents_std = 1.0 / latents_std_raw;
     prepared_latents = prepared_latents / latents_std;
     prepared_latents = prepared_latents + latents_mean;
+    auto pl_f32 = prepared_latents.to(torch::kFloat32);
+    std::cerr << "[DIAG] final_latents: shape=" << prepared_latents.sizes()
+              << " dtype=" << prepared_latents.dtype()
+              << " mean=" << pl_f32.mean().item<float>()
+              << " std=" << pl_f32.std().item<float>()
+              << " min=" << pl_f32.min().item<float>()
+              << " max=" << pl_f32.max().item<float>() << std::endl;
     video = vae_->decode(prepared_latents.to(torch::kFloat32)).sample;
 
     torch::save(video.contiguous(),
-                "/export/home/weinan5/zhangshaojie/cpp1/vae_output_cpp.pt");
+                "/export/home/weinan5/zhangshaojie/cpp3/vae_output_cpp.pt");
     video = video_processor_->postprocess_video(video);
 
     return video;
@@ -659,6 +738,7 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
   std::vector<double> latents_mean_;
   std::vector<double> latents_std_;
   torch::TensorOptions options_;
+  const ParallelArgs parallel_args_;
 };
 TORCH_MODULE(Wan2_2I2VPipeline);
 

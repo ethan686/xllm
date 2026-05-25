@@ -36,6 +36,8 @@ enum class LinearType {
   // Megatron-style tensor parallelism with column/row splitting +
   // gather/reduce.
   TensorParallel,
+  // Hybrid parallelism: combine tensor parallelism and sequence parallelism.
+  Hybrid,
 };
 
 // ── Sequence Parallel Options ──────────────────────────────────────────────
@@ -147,6 +149,18 @@ struct TpOptions {
 
 class DiTParallelLinearImpl : public torch::nn::Module {
  public:
+  // Default constructor (required by TORCH_MODULE)
+  DiTParallelLinearImpl()
+      : in_features_(0),
+        out_features_(0),
+        has_bias_(false),
+        linear_type_(LinearType::Default),
+        linear_(nullptr),
+        tp_weight_loaded_(false),
+        tp_bias_loaded_(false) {
+    tp_weight_ = torch::Tensor();
+    tp_bias_ = torch::Tensor();
+  }
   // ── Constructor: pre-built linear (QwenImage-compatible) ──
   DiTParallelLinearImpl(layer::AddMatmulWeightTransposed linear,
                         const std::string& module_name,
@@ -161,6 +175,8 @@ class DiTParallelLinearImpl : public torch::nn::Module {
     linear_ = register_module(module_name, std::move(linear));
     if (linear_type_ == LinearType::SequenceParallel) {
       sp_options_.validate();
+    } else if (linear_type_ == LinearType::Hybrid) {
+      LOG(FATAL) << "Hybrid mode requires TpOptions, use the other constructor";
     }
   }
 
@@ -197,6 +213,15 @@ class DiTParallelLinearImpl : public torch::nn::Module {
         tp_options_->validate();
         init_tp_weights();
         break;
+      case LinearType::Hybrid:
+        CHECK(tp_options.has_value()) << "Hybrid mode requires TpOptions";
+        CHECK(sp_options.has_value()) << "Hybrid mode requires SpOptions";
+        tp_options_ = tp_options;
+        sp_options_ = sp_options.value();
+        tp_options_->validate();
+        sp_options_.validate();
+        init_tp_weights();
+        break;
     }
   }
 
@@ -209,6 +234,8 @@ class DiTParallelLinearImpl : public torch::nn::Module {
         return forward_sp(input);
       case LinearType::TensorParallel:
         return forward_tp(input);
+      case LinearType::Hybrid:
+        return forward_hybrid(input);
       default:
         LOG(FATAL) << "DiTParallelLinear: unknown LinearType "
                    << static_cast<int>(linear_type_);
@@ -217,15 +244,23 @@ class DiTParallelLinearImpl : public torch::nn::Module {
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    if (linear_type_ == LinearType::TensorParallel) {
+    if (linear_type_ == LinearType::TensorParallel ||
+        linear_type_ == LinearType::Hybrid) {
       load_tp_weights(state_dict);
     } else {
+      if (!linear_.operator bool()) {
+        linear_ = register_module(
+            "linear",
+            layer::AddMatmulWeightTransposed(
+                in_features_, out_features_, has_bias_, tensor_options_));
+      }
       linear_->load_state_dict(state_dict);
     }
   }
 
   void verify_loaded_weights(const std::string& prefix) const {
-    if (linear_type_ == LinearType::TensorParallel) {
+    if (linear_type_ == LinearType::TensorParallel ||
+        linear_type_ == LinearType::Hybrid) {
       CHECK(tp_weight_loaded_)
           << "DiTParallelLinear: weight not loaded for " << prefix << "weight";
       if (has_bias_) {
@@ -233,13 +268,18 @@ class DiTParallelLinearImpl : public torch::nn::Module {
             << "DiTParallelLinear: bias not loaded for " << prefix << "bias";
       }
     } else {
+      CHECK(linear_.operator bool()) << "DiTParallelLinear: linear_ is empty "
+                                        "in verify_loaded_weights, prefix="
+                                     << prefix;
       linear_->verify_loaded_weights(prefix);
     }
   }
 
   torch::Tensor get_weight() const {
-    return linear_type_ == LinearType::TensorParallel ? tp_weight_
-                                                      : torch::Tensor();
+    return (linear_type_ == LinearType::TensorParallel ||
+            linear_type_ == LinearType::Hybrid)
+               ? tp_weight_
+               : torch::Tensor();
   }
 
  private:
@@ -353,6 +393,51 @@ class DiTParallelLinearImpl : public torch::nn::Module {
       output = output + tp_bias_;
     }
     return output;
+  }
+
+  torch::Tensor forward_hybrid(const torch::Tensor& input) {
+    const auto& tp = tp_options_.value();
+    const auto& sp = sp_options_;
+
+    // Fallback to single card mode
+    if (tp.tp_size == 1 && sp.process_group->world_size() == 1) {
+      return linear_->forward(input);
+    }
+
+    int64_t sp_group_size = sp.process_group->world_size();
+
+    // Scenario 1: column parallel + before_attention=true (Q/K/V projections)
+    if (tp.column_parallel && sp.before_attention) {
+      auto tp_out = forward_tp_column(input);
+      int64_t batch = input.size(0);
+      int64_t seq = input.size(1);
+      int64_t local_heads = sp.head_num / tp.tp_size;
+      int64_t head_dim = sp.head_dim;
+      auto reshaped = tp_out.view({batch, seq, local_heads, head_dim});
+      auto after_all2all = parallel_state::all_to_all_4D(
+          reshaped, 2, 1, false, sp.process_group);
+      // After all2all: [batch, seq*sp_size, heads/(tp*sp), head_dim]
+      // Flatten to 3D with correct hidden_size = hidden / (tp_size * sp_size)
+      return after_all2all().view(
+          {batch, -1, sp.hidden_size / (tp.tp_size * sp_group_size)});
+    }
+    // Scenario 2: row parallel + before_attention=false (output projection)
+    else if (!tp.column_parallel && !sp.before_attention) {
+      // Input has hidden / (tp_size * sp_size) features after hybrid attention
+      auto input_4d = input.view({input.size(0),
+                                  -1,
+                                  sp.head_num / (tp.tp_size * sp_group_size),
+                                  sp.head_dim});
+      auto after_all2all = parallel_state::all_to_all_4D(
+          input_4d, 1, 2, false, sp.process_group);
+      // After all2all: [B, seq/sp, heads/tp, head_dim] -> flatten to hidden/tp
+      auto gathered = after_all2all().view(
+          {input.size(0), -1, sp.hidden_size / tp.tp_size});
+      return forward_tp_row(gathered);
+    } else {
+      LOG(FATAL) << "Hybrid mode: unsupported combination";
+      return input;
+    }
   }
 
   void load_tp_weights(const StateDict& state_dict) {
