@@ -129,7 +129,6 @@ struct TpOptions {
 
 class DiTParallelLinearImpl : public torch::nn::Module {
  public:
-  // Default constructor (required by TORCH_MODULE)
   DiTParallelLinearImpl()
       : in_features_(0),
         out_features_(0),
@@ -141,7 +140,6 @@ class DiTParallelLinearImpl : public torch::nn::Module {
     tp_weight_ = torch::Tensor();
     tp_bias_ = torch::Tensor();
   }
-  // ── Constructor: pre-built linear (QwenImage-compatible) ──
   DiTParallelLinearImpl(layer::AddMatmulWeightTransposed linear,
                         const std::string& module_name,
                         LinearType linear_type = LinearType::Default,
@@ -155,8 +153,6 @@ class DiTParallelLinearImpl : public torch::nn::Module {
     linear_ = register_module(module_name, std::move(linear));
     if (linear_type_ == LinearType::SequenceParallel) {
       sp_options_.validate();
-    } else if (linear_type_ == LinearType::Hybrid) {
-      LOG(FATAL) << "Hybrid mode requires TpOptions, use the other constructor";
     }
   }
 
@@ -246,9 +242,6 @@ class DiTParallelLinearImpl : public torch::nn::Module {
             << "DiTParallelLinear: bias not loaded for " << prefix << "bias";
       }
     } else {
-      CHECK(linear_.operator bool()) << "DiTParallelLinear: linear_ is empty "
-                                        "in verify_loaded_weights, prefix="
-                                     << prefix;
       linear_->verify_loaded_weights(prefix);
     }
   }
@@ -377,14 +370,12 @@ class DiTParallelLinearImpl : public torch::nn::Module {
     const auto& tp = tp_options_.value();
     const auto& sp = sp_options_;
 
-    // Fallback to single card mode
     if (tp.tp_size == 1 && sp.process_group->world_size() == 1) {
       return linear_->forward(input);
     }
 
     int64_t sp_group_size = sp.process_group->world_size();
 
-    // Scenario 1: column parallel + before_attention=true (Q/K/V projections)
     if (tp.column_parallel && sp.before_attention) {
       auto tp_out = forward_tp_column(input);
       int64_t batch = input.size(0);
@@ -394,21 +385,15 @@ class DiTParallelLinearImpl : public torch::nn::Module {
       auto reshaped = tp_out.view({batch, seq, local_heads, head_dim});
       auto after_all2all = parallel_state::all_to_all_4D(
           reshaped, 2, 1, false, sp.process_group);
-      // After all2all: [batch, seq*sp_size, heads/(tp*sp), head_dim]
-      // Flatten to 3D with correct hidden_size = hidden / (tp_size * sp_size)
       return after_all2all().view(
           {batch, -1, sp.hidden_size / (tp.tp_size * sp_group_size)});
-    }
-    // Scenario 2: row parallel + before_attention=false (output projection)
-    else if (!tp.column_parallel && !sp.before_attention) {
-      // Input has hidden / (tp_size * sp_size) features after hybrid attention
+    } else if (!tp.column_parallel && !sp.before_attention) {
       auto input_4d = input.view({input.size(0),
                                   -1,
                                   sp.head_num / (tp.tp_size * sp_group_size),
                                   sp.head_dim});
       auto after_all2all = parallel_state::all_to_all_4D(
           input_4d, 1, 2, false, sp.process_group);
-      // After all2all: [B, seq/sp, heads/tp, head_dim] -> flatten to hidden/tp
       auto gathered = after_all2all().view(
           {input.size(0), -1, sp.hidden_size / tp.tp_size});
       return forward_tp_row(gathered);

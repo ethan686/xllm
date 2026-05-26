@@ -164,13 +164,7 @@ class WanTimestepEmbeddingImpl : public torch::nn::Module {
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    if (!linear_1_) {
-      LOG(FATAL) << "linear_1_ is null in WanTimestepEmbedding";
-    }
     linear_1_->load_state_dict(state_dict.get_dict_with_prefix("linear_1."));
-    if (!linear_2_) {
-      LOG(FATAL) << "linear_2_ is null in WanTimestepEmbedding";
-    }
     linear_2_->load_state_dict(state_dict.get_dict_with_prefix("linear_2."));
   }
 
@@ -295,9 +289,6 @@ class WanGELUImpl : public torch::nn::Module {
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    if (!proj_) {
-      LOG(FATAL) << "proj_ is null in WanGELU";
-    }
     proj_->as<DiTParallelLinear>()->load_state_dict(
         state_dict.get_dict_with_prefix("proj."));
   }
@@ -391,13 +382,7 @@ class WanFeedForwardImpl : public torch::nn::Module {
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    if (!act_fn_) {
-      LOG(FATAL) << "act_fn_ is null in WanFeedForward";
-    }
     act_fn_->load_state_dict(state_dict.get_dict_with_prefix("net.0."));
-    if (!proj_out_) {
-      LOG(FATAL) << "proj_out_ is null in WanFeedForward";
-    }
     proj_out_->load_state_dict(state_dict.get_dict_with_prefix("net.2."));
   }
 
@@ -462,13 +447,7 @@ class WanPixArtAlphaTextProjectionImpl : public torch::nn::Module {
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    if (!linear_1_) {
-      LOG(FATAL) << "linear_1_ is null in WanPixArtAlphaTextProjection";
-    }
     linear_1_->load_state_dict(state_dict.get_dict_with_prefix("linear_1."));
-    if (!linear_2_) {
-      LOG(FATAL) << "linear_2_ is null in WanPixArtAlphaTextProjection";
-    }
     linear_2_->load_state_dict(state_dict.get_dict_with_prefix("linear_2."));
   }
 
@@ -509,7 +488,6 @@ class WanAttentionImpl : public torch::nn::Module {
     } else {
       kv_inner_dim_ = heads_ * dim_head_;
     }
-    // Determine parallel mode based on FLAGS
     bool use_tp = (FLAGS_tp_size > 1);
     bool use_sp = (FLAGS_sp_size > 1);
 
@@ -522,30 +500,14 @@ class WanAttentionImpl : public torch::nn::Module {
       linear_type = LinearType::TensorParallel;
     }
 
-    // Get TP group info
     auto tp_group = parallel_args_.dit_tp_group_;
-    if (use_tp) {
-      CHECK(tp_group != nullptr)
-          << "WanAttention: use_tp=true but dit_tp_group_ is null — "
-          << "check parallel state initialization for hybrid mode";
-    }
     int64_t tp_rank = tp_group ? tp_group->rank() : 0;
     int64_t tp_size = tp_group ? tp_group->world_size() : 1;
     int64_t head_dim = dim_head_;
 
-    // SP group — must exist when use_sp is true, otherwise parallel init is
-    // broken
     ProcessGroup* sp_group = parallel_args_.dit_sp_group_;
-    if (use_sp) {
-      CHECK(sp_group != nullptr)
-          << "WanAttention: use_sp=true but dit_sp_group_ is null — "
-          << "check parallel state initialization for hybrid mode";
-    }
     int64_t sp_rank = sp_group ? sp_group->rank() : 0;
     int64_t sp_size = sp_group ? sp_group->world_size() : 1;
-    // Q/K/V TP options:
-    // - Q/K always gather full output for norm (both pure TP and Hybrid)
-    // - V stays split (no norm after V projection)
     std::optional<TpOptions> tp_opt_qk = std::nullopt;
     std::optional<TpOptions> tp_opt_v = std::nullopt;
     if (use_tp) {
@@ -570,9 +532,6 @@ class WanAttentionImpl : public torch::nn::Module {
     std::optional<SpOptions> sp_opt =
         use_sp ? std::optional<SpOptions>(sp_qkv) : std::nullopt;
 
-    // to_q / to_k: use TensorParallel in Hybrid mode so QK norm runs on full
-    // dimension (gather → norm → scatter via SP all2all in forward).
-    // Pure SP uses SequenceParallel; pure TP uses TensorParallel.
     LinearType qk_linear_type = linear_type;
     if (use_tp && use_sp) {
       qk_linear_type = LinearType::TensorParallel;
@@ -600,8 +559,6 @@ class WanAttentionImpl : public torch::nn::Module {
         dim_, heads_ * head_dim, true, options_, linear_type, sp_opt, tp_opt_v);
     to_v_ = register_module("to_v", to_v);
 
-    // Output projection (row-parallel: each rank computes partial output, then
-    // reduce)
     TpOptions tp_out(/*column_parallel=*/false,
                      /*tp_rank=*/tp_rank,
                      /*tp_size=*/tp_size,
@@ -632,14 +589,10 @@ class WanAttentionImpl : public torch::nn::Module {
     norm_k_ =
         register_module("norm_k", layer::RMSNorm(qk_norm_dim, eps_, options_));
     if (added_kv_proj_dim_ > 0) {
-      // add_k_proj: pure TP → gather_output=false (norm on partitioned
-      // features, matching original); Hybrid → gather_output=true (norm on full
-      // dimension before scatter+all2all)
       LinearType add_k_type = LinearType::Default;
       if (use_tp) {
         add_k_type = LinearType::TensorParallel;
       }
-      // add_v_proj: no norm after → can use Hybrid/SP efficiently
       LinearType add_v_type = linear_type;
 
       std::optional<SpOptions> add_sp_opt = std::nullopt;
@@ -653,7 +606,7 @@ class WanAttentionImpl : public torch::nn::Module {
             /*column_parallel=*/true,
             /*tp_rank=*/tp_rank,
             /*tp_size=*/tp_size,
-            /*gather_output=*/use_sp,  // false for pure TP, true for Hybrid
+            /*gather_output=*/use_sp,
             /*need_scatter=*/false,
             /*process_group=*/tp_group);
       }
@@ -744,18 +697,15 @@ class WanAttentionImpl : public torch::nn::Module {
     query = std::get<0>(norm_q_->forward(query));
     key = std::get<0>(norm_k_->forward(key));
 
-    // Hybrid: QK norm ran on full dimension, now TP scatter + SP all2all
     if (use_tp && use_sp) {
       auto tp_group = parallel_args_.dit_tp_group_;
       auto sp_group = parallel_args_.dit_sp_group_;
       int64_t tp_size = tp_group->world_size();
       int64_t sp_size = sp_group->world_size();
 
-      // Step 1: TP scatter (full features → per-TP-rank features)
       query = parallel_state::scatter(query, tp_group, /*dim=*/-1);
       key = parallel_state::scatter(key, tp_group, /*dim=*/-1);
 
-      // Step 2: SP all2all (reshuffle heads ↔ sequence)
       query = query.view({query.size(0), -1, heads_ / tp_size, dim_head_});
       auto q_fn = parallel_state::all_to_all_4D(
           query, /*scatter_dim=*/2, /*gather_dim=*/1, false, sp_group);
@@ -801,7 +751,6 @@ class WanAttentionImpl : public torch::nn::Module {
 
       key_img = std::get<0>(norm_added_k_->forward(key_img));
 
-      // Hybrid: norm ran on full dimension, TP scatter + SP all2all
       if (use_tp && use_sp) {
         auto tp_group = parallel_args_.dit_tp_group_;
         auto sp_group = parallel_args_.dit_sp_group_;
@@ -821,78 +770,9 @@ class WanAttentionImpl : public torch::nn::Module {
 
       key_img = key_img.view({batch_size, -1, n_heads, dim_head_});
       value_img = value_img.view({batch_size, -1, n_heads, dim_head_});
-
-      {
-#if defined(USE_NPU)
-        auto q_t = query.transpose(1, 2);  // [B, N, S, D]
-        auto k_t = key_img.transpose(1, 2);
-        auto v_t = value_img.transpose(1, 2);
-        int64_t head_num = q_t.size(1);
-        int64_t head_dim = q_t.size(-1);
-        auto results = at_npu::native::custom_ops::npu_fusion_attention(
-            q_t,
-            k_t,
-            v_t,
-            head_num,
-            "BNSD",
-            torch::nullopt,
-            torch::nullopt,
-            torch::nullopt,
-            std::pow(head_dim, -0.5),
-            1.0,
-            65535,
-            65535);
-        hidden_states_img = std::get<0>(results).transpose(
-            1, 2);  // [B, N, S, D] -> [B, S, N, D]
-#else
-        auto q_t = query.transpose(1, 2);
-        auto k_t = key_img.transpose(1, 2);
-        auto v_t = value_img.transpose(1, 2);
-        auto scale = 1.0 / std::sqrt(static_cast<double>(dim_head_));
-        auto attn_weights = torch::matmul(q_t, k_t.transpose(-2, -1)) * scale;
-        attn_weights = torch::softmax(attn_weights, -1);
-        hidden_states_img = torch::matmul(attn_weights, v_t).transpose(1, 2);
-#endif
-      }
-      hidden_states_img = hidden_states_img.flatten(2, 3);
-      hidden_states_img = hidden_states_img.to(query.dtype());
+      hidden_states_img = at_npu_attention(query, key_img, value_img);
     }
-
-    {
-#if defined(USE_NPU)
-      auto q_t = query.transpose(1, 2);  // [B, S, N, D] -> [B, N, S, D]
-      auto k_t = key.transpose(1, 2);
-      auto v_t = value.transpose(1, 2);
-      int64_t head_num = q_t.size(1);
-      int64_t head_dim = q_t.size(-1);
-      auto results = at_npu::native::custom_ops::npu_fusion_attention(
-          q_t,
-          k_t,
-          v_t,
-          head_num,
-          "BNSD",
-          torch::nullopt,
-          torch::nullopt,
-          torch::nullopt,
-          std::pow(head_dim, -0.5),
-          1.0,
-          65535,
-          65535);
-      hidden_states =
-          std::get<0>(results).transpose(1, 2);  // [B, N, S, D] -> [B, S, N, D]
-#else
-      auto q_t = query.transpose(1, 2);
-      auto k_t = key.transpose(1, 2);
-      auto v_t = value.transpose(1, 2);
-      auto scale = 1.0 / std::sqrt(static_cast<double>(dim_head_));
-      auto attn_weights = torch::matmul(q_t, k_t.transpose(-2, -1)) * scale;
-      attn_weights = torch::softmax(attn_weights, -1);
-      hidden_states = torch::matmul(attn_weights, v_t).transpose(1, 2);
-#endif
-    }
-    hidden_states = hidden_states.flatten(2, 3);
-    hidden_states = hidden_states.to(query.dtype());
-
+    hidden_states = at_npu_attention(query, key, value);
     if (hidden_states_img.defined()) {
       hidden_states = hidden_states + hidden_states_img;
     }
@@ -903,34 +783,16 @@ class WanAttentionImpl : public torch::nn::Module {
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    if (!to_q_) {
-      LOG(FATAL) << "to_q_ is null in WanAttention";
-    }
     to_q_->load_state_dict(state_dict.get_dict_with_prefix("to_q."));
-    if (!to_k_) {
-      LOG(FATAL) << "to_k_ is null in WanAttention";
-    }
     to_k_->load_state_dict(state_dict.get_dict_with_prefix("to_k."));
-    if (!to_v_) {
-      LOG(FATAL) << "to_v_ is null in WanAttention";
-    }
     to_v_->load_state_dict(state_dict.get_dict_with_prefix("to_v."));
 
-    if (!to_out_) {
-      LOG(FATAL) << "to_out_ is null in WanAttention";
-    }
     to_out_->load_state_dict(state_dict.get_dict_with_prefix("to_out.0."));
 
-    if (!norm_q_) {
-      LOG(FATAL) << "norm_q_ is null in WanAttention";
-    }
     if (norm_q_->weight().size(0) == heads_ * dim_head_) {
       norm_q_->load_state_dict(state_dict.get_dict_with_prefix("norm_q."));
     } else {
       load_norm_weight(state_dict, "norm_q.", norm_q_->weight());
-    }
-    if (!norm_k_) {
-      LOG(FATAL) << "norm_k_ is null in WanAttention";
     }
     if (norm_k_->weight().size(0) == heads_ * dim_head_) {
       norm_k_->load_state_dict(state_dict.get_dict_with_prefix("norm_k."));
@@ -939,14 +801,8 @@ class WanAttentionImpl : public torch::nn::Module {
     }
 
     if (add_k_proj_.operator bool()) {
-      if (!add_k_proj_) {
-        LOG(FATAL) << "add_k_proj_ is null in WanAttention";
-      }
       add_k_proj_->load_state_dict(
           state_dict.get_dict_with_prefix("add_k_proj."));
-      if (!add_v_proj_) {
-        LOG(FATAL) << "add_v_proj_ is null in WanAttention";
-      }
       add_v_proj_->load_state_dict(
           state_dict.get_dict_with_prefix("add_v_proj."));
       if (norm_added_k_) {
@@ -983,7 +839,6 @@ class WanAttentionImpl : public torch::nn::Module {
       weight::load_weight(sub_dict, "weight", norm_weight, loaded);
       return;
     }
-    // Partitioned norm: slice from full checkpoint weight
     int64_t tp_rank = 0, tp_size = 1;
     if (parallel_args_.dit_tp_group_) {
       tp_rank = parallel_args_.dit_tp_group_->rank();
@@ -1032,7 +887,6 @@ class WanAttentionImpl : public torch::nn::Module {
 TORCH_MODULE(WanAttention);
 
 // for wan2.2 I2V, actually not used
-
 class WanImageEmbeddingImpl : public torch::nn::Module {
  public:
   explicit WanImageEmbeddingImpl(const ModelContext& context)
@@ -1068,47 +922,25 @@ class WanImageEmbeddingImpl : public torch::nn::Module {
 
   torch::Tensor forward(const torch::Tensor& encoder_hidden_states_image) {
     torch::Tensor hidden_states = encoder_hidden_states_image;
-    std::cerr << "[DEBUG] WanImageEmbedding::forward ENTER, shape="
-              << hidden_states.sizes() << std::endl;
 
     if (pos_embed_.defined()) {
       int64_t batch_size = hidden_states.size(0);
       int64_t seq_len = hidden_states.size(1);
       int64_t embed_dim = hidden_states.size(2);
-      std::cerr << "[DEBUG] WanImageEmbedding: pos_embed branch, batch="
-                << batch_size << " seq_len=" << seq_len
-                << " embed_dim=" << embed_dim << std::endl;
       hidden_states = hidden_states.view({-1, 2 * seq_len, embed_dim});
       hidden_states = hidden_states + pos_embed_;
     }
 
-    std::cerr << "[DEBUG] WanImageEmbedding: before norm1, shape="
-              << hidden_states.sizes() << std::endl;
     hidden_states = norm1_->forward(hidden_states);
-    std::cerr << "[DEBUG] WanImageEmbedding: before ff, shape="
-              << hidden_states.sizes() << std::endl;
     hidden_states = ff_->forward(hidden_states);
-    std::cerr << "[DEBUG] WanImageEmbedding: after ff, shape="
-              << hidden_states.sizes() << std::endl;
     hidden_states = norm2_->forward(hidden_states);
-    std::cerr << "[DEBUG] WanImageEmbedding: EXIT, shape="
-              << hidden_states.sizes() << std::endl;
 
     return hidden_states;
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    if (!norm1_) {
-      LOG(FATAL) << "norm1_ is null in WanImageEmbedding";
-    }
     norm1_->load_state_dict(state_dict.get_dict_with_prefix("norm1."));
-    if (!ff_) {
-      LOG(FATAL) << "ff_ is null in WanImageEmbedding";
-    }
     ff_->load_state_dict(state_dict.get_dict_with_prefix("ff."));
-    if (!norm2_) {
-      LOG(FATAL) << "norm2_ is null in WanImageEmbedding";
-    }
     norm2_->load_state_dict(state_dict.get_dict_with_prefix("norm2."));
     if (pos_embed_.defined()) {
       weight::load_weight(
@@ -1200,36 +1032,15 @@ class WanTimeTextImageEmbeddingImpl : public torch::nn::Module {
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    std::cerr << "[DEBUG] WanTimeTextImageEmbedding::load_state_dict ENTER"
-              << std::endl;
-    if (!time_embedder_) {
-      LOG(FATAL) << "time_embedder_ is null in WanTimeTextImageEmbedding";
-    }
-    std::cerr << "[DEBUG] WanTimeTextImageEmbedding: loading time_embedder"
-              << std::endl;
     time_embedder_->load_state_dict(
         state_dict.get_dict_with_prefix("time_embedder."));
-    if (!time_proj_) {
-      LOG(FATAL) << "time_proj_ is null in WanTimeTextImageEmbedding";
-    }
-    std::cerr << "[DEBUG] WanTimeTextImageEmbedding: loading time_proj"
-              << std::endl;
     time_proj_->load_state_dict(state_dict.get_dict_with_prefix("time_proj."));
-    if (!text_embedder_) {
-      LOG(FATAL) << "text_embedder_ is null in WanTimeTextImageEmbedding";
-    }
-    std::cerr << "[DEBUG] WanTimeTextImageEmbedding: loading text_embedder"
-              << std::endl;
     text_embedder_->load_state_dict(
         state_dict.get_dict_with_prefix("text_embedder."));
     if (image_embedder_) {
-      std::cerr << "[DEBUG] WanTimeTextImageEmbedding: loading image_embedder"
-                << std::endl;
       image_embedder_->load_state_dict(
           state_dict.get_dict_with_prefix("image_embedder."));
     }
-    std::cerr << "[DEBUG] WanTimeTextImageEmbedding::load_state_dict EXIT"
-              << std::endl;
   }
 
   void verify_loaded_weights(const std::string& prefix) const {
@@ -1264,19 +1075,15 @@ class WanRotaryPosEmbedImpl : public torch::nn::Module {
  public:
   explicit WanRotaryPosEmbedImpl(const ModelContext& context)
       : options_(context.get_tensor_options()) {
-    LOG(INFO) << "WanRotaryPosEmbedImpl constructor start";
     auto model_args = context.get_model_args();
-    LOG(INFO) << "WanRotaryPosEmbedImpl got model_args";
     attention_head_dim_ = model_args.head_dim();
     patch_size_ = model_args.wan_patch_size();
     max_seq_len_ = model_args.rope_max_seq_len();
     theta_ = 10000.0f;
-    LOG(INFO) << "WanRotaryPosEmbedImpl before compute_freqs";
     h_dim_ = w_dim_ = 2 * (attention_head_dim_ / 6);
     t_dim_ = attention_head_dim_ - h_dim_ - w_dim_;
 
     compute_freqs();
-    LOG(INFO) << "WanRotaryPosEmbedImpl constructor end";
   }
 
   torch::Tensor get_freqs_cos() const { return freqs_cos_; }
@@ -1338,7 +1145,6 @@ class WanRotaryPosEmbedImpl : public torch::nn::Module {
     torch::Tensor freqs_sin =
         torch::cat({freqs_sin_f, freqs_sin_h, freqs_sin_w}, -1)
             .reshape({1, ppf * pph * ppw, 1, -1});
-    // Slice for sequence parallelism
     if (sp_size > 1) {
       int64_t chunk_len = freqs_cos.size(1) / sp_size;
       freqs_cos = freqs_cos.narrow(1, sp_rank * chunk_len, chunk_len);
@@ -1488,19 +1294,10 @@ class WanTransformerBlockImpl : public torch::nn::Module {
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    if (!attn1_) {
-      LOG(FATAL) << "attn1_ is null in WanTransformerBlock";
-    }
     attn1_->load_state_dict(state_dict.get_dict_with_prefix("attn1."));
-    if (!attn2_) {
-      LOG(FATAL) << "attn2_ is null in WanTransformerBlock";
-    }
     attn2_->load_state_dict(state_dict.get_dict_with_prefix("attn2."));
     if (cross_attn_norm_ && norm2_) {
       norm2_->load_state_dict(state_dict.get_dict_with_prefix("norm2."));
-    }
-    if (!ff_) {
-      LOG(FATAL) << "ff_ is null in WanTransformerBlock";
     }
     ff_->load_state_dict(state_dict.get_dict_with_prefix("ffn."));
     weight::load_weight(state_dict,
@@ -1549,16 +1346,11 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
   explicit WanTransformer3DModelImpl(const ModelContext& context,
                                      const ParallelArgs& parallel_args)
       : options_(context.get_tensor_options()), parallel_args_(parallel_args) {
-    std::cerr << "[DEBUG] WanTransformer3DModelImpl: constructor start"
-              << std::endl;
     auto model_args = context.get_model_args();
-    std::cerr << "[DEBUG] WanTransformer3DModelImpl: got model_args"
-              << std::endl;
     patch_size_ = model_args.wan_patch_size();
     num_attention_heads_ = model_args.n_heads();
     attention_head_dim_ = model_args.head_dim();
     in_channels_ = model_args.dit_in_channels();
-    std::cerr << "[DEBUG] in_channels_ = " << in_channels_ << std::endl;
     out_channels_ = model_args.dit_out_channels();
     text_dim_ = model_args.text_embed_dim();
     freq_dim_ = model_args.time_freq_dim();
@@ -1572,23 +1364,13 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
     qk_norm_ = model_args.qk_norm();
 
     inner_dim_ = num_attention_heads_ * attention_head_dim_;
-    std::cerr << "[DEBUG] inner_dim_ = " << inner_dim_ << std::endl;
     if (out_channels_ <= 0) {
       out_channels_ = in_channels_;
     }
     rope_ = register_module("rope", WanRotaryPosEmbed(context));
-    if (!rope_) {
-      LOG(FATAL) << "Failed to create rope_";
-    }
     auto tp_group = parallel_args_.dit_tp_group_;
     int64_t tp_size = tp_group ? tp_group->world_size() : 1;
     int64_t patch_embed_out_channels = inner_dim_;
-    std::cerr << "[DEBUG] Creating patch_embedding_: in_channels="
-              << in_channels_ << ", inner_dim=" << inner_dim_
-              << ", tp_size=" << tp_size
-              << ", out_channels=" << patch_embed_out_channels
-              << ", patch_size=(" << patch_size_[0] << "," << patch_size_[1]
-              << "," << patch_size_[2] << ")" << std::endl;
     patch_embedding_ = register_module(
         "patch_embedding",
         torch::nn::Conv3d(
@@ -1598,26 +1380,10 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
                 {patch_size_[0], patch_size_[1], patch_size_[2]})
                 .stride({patch_size_[0], patch_size_[1], patch_size_[2]})
                 .padding(0)));
-    if (!patch_embedding_) {
-      std::cerr << "[ERROR] patch_embedding_ creation failed!" << std::endl;
-      LOG(FATAL) << "Failed to create patch_embedding_";
-    }
-    // Move to correct device and ensure weights are allocated
     patch_embedding_->to(options_.device());
     patch_embedding_->to(options_.dtype().toScalarType());
-    std::cerr << "[DEBUG] patch_embedding_ weight numel = "
-              << patch_embedding_->weight.numel() << std::endl;
-    if (patch_embedding_->weight.numel() == 0) {
-      LOG(FATAL) << "patch_embedding_ weight has zero elements";
-    }
-    if (patch_embedding_->bias.numel() == 0) {
-      LOG(FATAL) << "patch_embedding_ bias has zero elements";
-    }
     condition_embedder_ = register_module("condition_embedder",
                                           WanTimeTextImageEmbedding(context));
-    if (!condition_embedder_) {
-      LOG(FATAL) << "Failed to create condition_embedder_";
-    }
     blocks_ = register_module("blocks", torch::nn::ModuleList());
     for (int64_t i = 0; i < num_layers_; ++i) {
       auto block =
@@ -1632,9 +1398,6 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
         "proj_out",
         layer::AddMatmul(
             inner_dim_, out_channels_ * patch_prod, true, options_));
-    if (!proj_out_) {
-      LOG(FATAL) << "Failed to create proj_out_";
-    }
     scale_shift_table_ =
         register_parameter("scale_shift_table",
                            torch::randn({1, 2, inner_dim_}, options_) /
@@ -1642,6 +1405,8 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
   }
 
   torch::Tensor forward(
+      bool is_cfg,
+      int trans_idx,
       const torch::Tensor& hidden_states_in,
       const torch::Tensor& timestep,
       const torch::Tensor& encoder_hidden_states,
@@ -1666,18 +1431,12 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
       sp_rank = parallel_args_.dit_sp_group_->rank();
       sp_size = parallel_args_.dit_sp_group_->world_size();
     }
-    // sp_size=1: rope must cover the full sequence because attention applies it
-    // AFTER all_to_all has gathered sequence across ranks
     auto [freqs_cos, freqs_sin] =
         rope_->forward(hidden_states, /*sp_rank=*/0, /*sp_size=*/1);
     hidden_states = patch_embedding_->forward(
         hidden_states.to(patch_embedding_->weight.dtype()));
     hidden_states = hidden_states.flatten(2).transpose(1, 2).contiguous();
-    // TP: patch_embedding Conv3d already outputs full inner_dim_ (5120) on each
-    // rank, so no all-gather needed. Each rank independently has the full patch
-    // embedding.
 
-    // Pad sequence to be divisible by sp_size for sequence parallelism
     int64_t original_seq_len = hidden_states.size(1);
     int64_t padded_seq_len = original_seq_len;
     if (sp_size > 1 && original_seq_len % sp_size != 0) {
@@ -1687,7 +1446,6 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
           hidden_states,
           torch::nn::functional::PadFuncOptions({0, 0, 0, pad_len}));
 
-      // Pad full-sequence rope to match padded sequence length
       int64_t rope_seq = freqs_cos.size(1);
       int64_t rope_pad = padded_seq_len - rope_seq;
       if (rope_pad > 0) {
@@ -1701,7 +1459,6 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
     }
     auto rotary_emb = std::make_pair(freqs_cos, freqs_sin);
 
-    // condition_embedder needs full padded seq so temb covers all positions
     torch::Tensor timestep_input = timestep;
     int64_t ts_seq_len_val = hidden_states.size(1);
     std::optional<int64_t> ts_seq_len = ts_seq_len_val;
@@ -1719,7 +1476,6 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
                                      ts_seq_len);
 
     if (timestep_proj.dim() == 4) {
-      // already 4D, nothing to do
     } else if (ts_seq_len.has_value() && ts_seq_len.value() > 1) {
       timestep_proj =
           timestep_proj.view({batch_size, ts_seq_len.value(), 6, -1});
@@ -1734,10 +1490,6 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
                      1);
     }
 
-    // In SP mode, split the full sequence so each rank processes only its
-    // chunk. The SP linear's all_to_all gathers the full sequence during
-    // attention and the output projection scatters it back to per-rank. We must
-    // start split.
     if (sp_size > 1) {
       int64_t per_rank_seq = padded_seq_len / sp_size;
       hidden_states =
@@ -1756,10 +1508,6 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
           rotary_emb);
     }
 
-    // Reconstruct full sequence after SP blocks.
-    // Each rank holds S/sp tokens; we need S tokens on every rank.
-    // Trick: replicate our chunk sp_size times → all_to_all routes each
-    // replica to the corresponding rank and gathers the received chunks.
     if (sp_size > 1) {
       int64_t B = hidden_states.size(0);
       int64_t per_rank = hidden_states.size(1);
@@ -1771,7 +1519,6 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
                                               /*gather_dim=*/1,
                                               /*async=*/false,
                                               parallel_args_.dit_sp_group_);
-      // Result: [B, sp_size * per_rank, 1, H] = [B, S, 1, H]
       hidden_states = fn().select(2, 0);
     }
 
@@ -1802,7 +1549,6 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
     if (sp_size > 1 && original_seq_len != padded_seq_len) {
       hidden_states = hidden_states.slice(1, 0, original_seq_len);
     }
-
     hidden_states = proj_out_->forward(hidden_states);
     hidden_states = hidden_states.view({batch_size,
                                         post_patch_num_frames,
@@ -1818,84 +1564,27 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    // Check all modules are initialized before loading
-    if (!patch_embedding_) {
-      LOG(FATAL) << "patch_embedding_ is null, module not properly initialized";
-    }
-    if (!condition_embedder_) {
-      LOG(FATAL)
-          << "condition_embedder_ is null, module not properly initialized";
-    }
-    if (!proj_out_) {
-      LOG(FATAL) << "proj_out_ is null, module not properly initialized";
-    }
-    if (!rope_) {
-      LOG(FATAL) << "rope_ is null, module not properly initialized";
-    }
-    if (!blocks_) {
-      LOG(FATAL) << "blocks_ is null, module not properly initialized";
-    }
-    if (!norm_out_) {
-      LOG(FATAL) << "norm_out_ is null, module not properly initialized";
-    }
-
-    // Check weight tensors are defined
-    if (!patch_embedding_->weight.defined()) {
-      LOG(FATAL) << "patch_embedding_->weight is not defined";
-    }
-    if (patch_embedding_->weight.numel() == 0) {
-      LOG(FATAL) << "patch_embedding_->weight has zero elements";
-    }
-    if (!patch_embedding_->bias.defined()) {
-      LOG(FATAL) << "patch_embedding_->bias is not defined";
-    }
-    if (patch_embedding_->bias.numel() == 0) {
-      LOG(FATAL) << "patch_embedding_->bias has zero elements";
-    }
-
-    std::cerr << "[DEBUG] load_state_dict: ENTER" << std::endl;
     torch::NoGradGuard no_grad;
-    std::cerr << "[DEBUG] load_state_dict: loading patch_embedding.weight"
-              << std::endl;
     weight::load_weight(state_dict,
                         "patch_embedding.weight",
                         patch_embedding_->weight,
                         pad_embedding_weight_loaded_);
-    std::cerr << "[DEBUG] load_state_dict: loading patch_embedding.bias"
-              << std::endl;
     weight::load_weight(state_dict,
                         "patch_embedding.bias",
                         patch_embedding_->bias,
                         pad_embedding_bias_loaded_);
 
-    std::cerr << "[DEBUG] load_state_dict: loading condition_embedder"
-              << std::endl;
     condition_embedder_->load_state_dict(
         state_dict.get_dict_with_prefix("condition_embedder."));
-    std::cerr
-        << "[DEBUG] load_state_dict: condition_embedder done, blocks_->size()="
-        << blocks_->size() << std::endl;
     for (int64_t i = 0; i < blocks_->size(); ++i) {
-      auto block_ptr = blocks_[i];
-      if (!block_ptr) {
-        LOG(FATAL) << "blocks_[" << i << "] is null shared_ptr";
-      }
-      std::cerr << "[DEBUG] load_state_dict: loading block " << i << std::endl;
-      block_ptr->as<WanTransformerBlock>()->load_state_dict(
+      blocks_[i]->as<WanTransformerBlock>()->load_state_dict(
           state_dict.get_dict_with_prefix("blocks." + std::to_string(i) + "."));
-      std::cerr << "[DEBUG] load_state_dict: block " << i << " done"
-                << std::endl;
     }
-
-    std::cerr << "[DEBUG] load_state_dict: loading proj_out" << std::endl;
     proj_out_->load_state_dict(state_dict.get_dict_with_prefix("proj_out."));
-    std::cerr << "[DEBUG] load_state_dict: loading scale_shift_table"
-              << std::endl;
     weight::load_weight(state_dict,
                         "scale_shift_table",
                         scale_shift_table_,
                         scale_shift_table_loaded_);
-    std::cerr << "[DEBUG] load_state_dict: EXIT" << std::endl;
   }
 
   void verify_loaded_weights(const std::string& prefix) {
@@ -1919,31 +1608,17 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
   bool guidance_embeds() const { return false; }
 
   void load_model(std::unique_ptr<DiTFolderLoader> loader) {
-    LOG(INFO) << "load_model: start";
-
     for (const auto& state_dict : loader->get_state_dicts()) {
-      LOG(INFO) << "load_model: loading state_dict";
       load_state_dict(*state_dict);
-      LOG(INFO) << "load_model: load_state_dict done";
     }
-
-    LOG(INFO) << "load_model: verify_loaded_weights start";
     verify_loaded_weights("");
-    LOG(INFO) << "load_model: verify_loaded_weights done";
 
-    LOG(INFO) << "load_model: getting freqs";
     auto freqs_cos_fp32 = rope_->get_freqs_cos().clone();
     auto freqs_sin_fp32 = rope_->get_freqs_sin().clone();
-    LOG(INFO) << "load_model: freqs cloned";
 
-    LOG(INFO) << "load_model: converting to bfloat16";
     this->to(torch::kBFloat16);
-    LOG(INFO) << "load_model: to bfloat16 done";
-
-    LOG(INFO) << "load_model: setting freqs";
     rope_->set_freqs_cos(freqs_cos_fp32);
     rope_->set_freqs_sin(freqs_sin_fp32);
-    LOG(INFO) << "load_model: end";
   }
 
  private:
@@ -1984,18 +1659,19 @@ class Wan22DiTModelImpl : public torch::nn::Module {
   explicit Wan22DiTModelImpl(const ModelContext& context,
                              const ParallelArgs& parallel_args)
       : options_(context.get_tensor_options()) {
-    std::cerr << "[DEBUG] Wan22DiTModelImpl: start" << std::endl;
     wan2_2_transformer_ = register_module(
         "wan2_2_transformer", WanTransformer3DModel(context, parallel_args));
-    std::cerr << "[DEBUG] Wan22DiTModelImpl: end" << std::endl;
   }
-
   torch::Tensor forward(
+      bool is_cfg,
+      int trans_idx,
       const torch::Tensor& hidden_states,
       const torch::Tensor& timestep,
       const torch::Tensor& encoder_hidden_states,
       const torch::Tensor& encoder_hidden_states_image = torch::Tensor()) {
-    return wan2_2_transformer_->forward(hidden_states,
+    return wan2_2_transformer_->forward(is_cfg,
+                                        trans_idx,
+                                        hidden_states,
                                         timestep,
                                         encoder_hidden_states,
                                         encoder_hidden_states_image);

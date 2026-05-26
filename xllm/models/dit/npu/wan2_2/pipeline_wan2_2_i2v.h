@@ -16,8 +16,8 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <algorithm>
-#include <cstring>
 #include <memory>
+#include <string>
 
 #include "autoencoder_kl_wan.h"
 #include "core/framework/dit_model_loader.h"
@@ -51,14 +51,10 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
 
     LOG(INFO) << "Initializing Wan2_2I2V pipeline...";
     vae_ = AutoencoderKLWan(context.get_model_context("vae"));
-    std::cerr << "[DEBUG] Pipeline: creating transformer_" << std::endl;
     transformer_ = Wan22DiTModel(context.get_model_context("transformer"),
                                  context.get_parallel_args());
-    std::cerr << "[DEBUG] Pipeline: transformer_ created" << std::endl;
-    std::cerr << "[DEBUG] Pipeline: creating transformer_2_" << std::endl;
     transformer_2_ = Wan22DiTModel(context.get_model_context("transformer_2"),
                                    context.get_parallel_args());
-    std::cerr << "[DEBUG] Pipeline: transformer_2_ created" << std::endl;
     umt5_ = UMT5EncoderModel(context.get_model_context("text_encoder"));
     scheduler_ =
         UniPCMultistepScheduler(context.get_model_context("scheduler"));
@@ -429,7 +425,6 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
     int64_t dw = vae_scale_factor_spatial_ * patch_size_w;
     int64_t dh = vae_scale_factor_spatial_ * patch_size_h;
 
-    // Call unified function for dimension adjustment
     AdjustVideoSize(images, height, width, dw, dh, false);
 
     if (boundary_ratio_ > 0.0f && guidance_scale_2 < 0.0f) {
@@ -450,12 +445,6 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
                               /*sigmas*/ std::nullopt,
                               /*mu*/ std::nullopt);
     torch::Tensor timesteps = scheduler_->timesteps();
-    std::cerr << "[DIAG] timesteps: num=" << timesteps.numel() << " values=[";
-    for (int64_t j = 0; j < std::min(timesteps.numel(), (int64_t)5); ++j) {
-      if (j > 0) std::cerr << ", ";
-      std::cerr << timesteps[j].item<float>();
-    }
-    std::cerr << "]" << std::endl;
 
     int64_t num_channels_latents = zdim_;
     torch::Tensor input_image;
@@ -599,32 +588,6 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
                                             torch::Tensor());
       }
 
-      if (i == 0) {
-        auto np_f32 = noise_pred.to(torch::kFloat32);
-        std::cerr << "[DIAG] noise_pred step0: shape=" << noise_pred.sizes()
-                  << " dtype=" << noise_pred.dtype()
-                  << " mean=" << np_f32.mean().item<float>()
-                  << " std=" << np_f32.std().item<float>()
-                  << " min=" << np_f32.min().item<float>()
-                  << " max=" << np_f32.max().item<float>() << std::endl;
-        auto li_f32 = latent_model_input.to(torch::kFloat32);
-        std::cerr << "[DIAG] latent_input step0: shape="
-                  << latent_model_input.sizes()
-                  << " dtype=" << latent_model_input.dtype()
-                  << " mean=" << li_f32.mean().item<float>()
-                  << " std=" << li_f32.std().item<float>()
-                  << " min=" << li_f32.min().item<float>()
-                  << " max=" << li_f32.max().item<float>() << std::endl;
-        auto pe_f32 = encoded_prompt_embeds.to(torch::kFloat32);
-        std::cerr << "[DIAG] prompt_embeds: shape="
-                  << encoded_prompt_embeds.sizes()
-                  << " dtype=" << encoded_prompt_embeds.dtype()
-                  << " mean=" << pe_f32.mean().item<float>()
-                  << " std=" << pe_f32.std().item<float>()
-                  << " min=" << pe_f32.min().item<float>()
-                  << " max=" << pe_f32.max().item<float>() << std::endl;
-      }
-
       auto prev_latents = scheduler_->step(noise_pred, t, prepared_latents);
       prepared_latents = prev_latents.detach();
       noise_pred.reset();
@@ -657,13 +620,6 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
     torch::Tensor latents_std = 1.0 / latents_std_raw;
     prepared_latents = prepared_latents / latents_std;
     prepared_latents = prepared_latents + latents_mean;
-    auto pl_f32 = prepared_latents.to(torch::kFloat32);
-    std::cerr << "[DIAG] final_latents: shape=" << prepared_latents.sizes()
-              << " dtype=" << prepared_latents.dtype()
-              << " mean=" << pl_f32.mean().item<float>()
-              << " std=" << pl_f32.std().item<float>()
-              << " min=" << pl_f32.min().item<float>()
-              << " max=" << pl_f32.max().item<float>() << std::endl;
     video = vae_->decode(prepared_latents.to(torch::kFloat32)).sample;
 
     torch::save(video.contiguous(),
@@ -680,8 +636,6 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
                        int64_t dh,
                        bool use_user_priority) {
     if (use_user_priority) {
-      // User priority mode: directly use user-specified dimensions
-      // Only enforce alignment to 16x multiple (dw, dh)
       if (height % dh != 0) {
         height = (height / dh) * dh;
         LOG(WARNING) << "Height adjusted to " << height << " (multiple of "
