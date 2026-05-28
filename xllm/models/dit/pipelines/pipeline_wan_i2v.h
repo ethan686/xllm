@@ -53,17 +53,17 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
     vae_ = AutoencoderKLWan(context.get_model_context("vae"));
     transformer_ = Wan22DiTModel(context.get_model_context("transformer"));
     transformer_2_ = Wan22DiTModel(context.get_model_context("transformer_2"));
-    umt5_ = UMT5EncoderModel(context.get_model_context("text_encoder"));
+    umt5_ = UMT5WanEncoderModel(context.get_model_context("text_encoder"));
     scheduler_ =
         UniPCMultistepScheduler(context.get_model_context("scheduler"));
-    video_processor_ = VideoProcessor(context.get_model_context("vae"),
-                                      true,
-                                      true,
-                                      false,
-                                      false,
-                                      false,
-                                      4,
-                                      vae_scale_factor_spatial_);
+    video_processor_ = VAEVideoProcessor(context.get_model_context("vae"),
+                                         true,
+                                         true,
+                                         false,
+                                         false,
+                                         false,
+                                         4,
+                                         vae_scale_factor_spatial_);
     register_module("vae", vae_);
     register_module("transformer", transformer_);
     register_module("transformer_2", transformer_2_);
@@ -97,10 +97,6 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
             ? std::make_optional(input.negative_prompt_embeds)
             : std::nullopt;
 
-    auto image_embeds = input.image_embeds.defined()
-                            ? std::make_optional(input.image_embeds)
-                            : std::nullopt;
-
     auto output = forward_impl(images,
                                last_images,
                                prompts,
@@ -114,7 +110,6 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
                                generation_params.num_videos_per_prompt,
                                seed,
                                latents,
-                               image_embeds,
                                prompt_embeds,
                                negative_prompt_embeds,
                                generation_params.max_sequence_length);
@@ -376,7 +371,6 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
       int64_t num_videos_per_prompt = 1,
       int64_t seed = 42,
       std::optional<torch::Tensor> latents = std::nullopt,
-      std::optional<torch::Tensor> image_embeds = std::nullopt,
       std::optional<torch::Tensor> prompt_embeds = std::nullopt,
       std::optional<torch::Tensor> negative_prompt_embeds = std::nullopt,
       int64_t max_sequence_length = 512) {
@@ -660,9 +654,9 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
   AutoencoderKLWan vae_{nullptr};
   Wan22DiTModel transformer_{nullptr};
   Wan22DiTModel transformer_2_{nullptr};
-  UMT5EncoderModel umt5_{nullptr};
+  UMT5WanEncoderModel umt5_{nullptr};
   std::unique_ptr<Tokenizer> tokenizer_{nullptr};
-  VideoProcessor video_processor_{nullptr};
+  VAEVideoProcessor video_processor_{nullptr};
 
   float vae_scaling_factor_;
   float vae_shift_factor_;
@@ -679,6 +673,6 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
 };
 TORCH_MODULE(Wan2_2I2VPipeline);
 
-REGISTER_DIT_MODEL(wan2_2, Wan2_2I2VPipeline);
+REGISTER_DIT_MODEL(WanImageToVideoPipeline, Wan2_2I2VPipeline);
 
 }  // namespace xllm

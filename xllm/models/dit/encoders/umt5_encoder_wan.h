@@ -303,9 +303,9 @@ class UMT5WanBlockImpl final : public torch::nn::Module {
 };
 TORCH_MODULE(UMT5WanBlock);
 
-class UMT5EncoderModelImpl final : public torch::nn::Module {
+class UMT5WanEncoderModelImpl final : public torch::nn::Module {
  public:
-  explicit UMT5EncoderModelImpl(const ModelContext& context) {
+  explicit UMT5WanEncoderModelImpl(const ModelContext& context) {
     auto model_args = context.get_model_args();
     auto options = context.get_tensor_options();
     embed_tokens_ = register_module(
@@ -372,7 +372,7 @@ class UMT5EncoderModelImpl final : public torch::nn::Module {
       }
     }
     verify_loaded_weights();
-    LOG(INFO) << "UMT5EncoderModel loaded successfully.";
+    LOG(INFO) << "UMT5WanEncoderModel loaded successfully.";
   }
 
   void verify_loaded_weights() const {
@@ -392,7 +392,7 @@ class UMT5EncoderModelImpl final : public torch::nn::Module {
   std::vector<UMT5WanBlock> layers_;
   torch::nn::ModuleList blocks_ = nullptr;
 };
-TORCH_MODULE(UMT5EncoderModel);
+TORCH_MODULE(UMT5WanEncoderModel);
 
 REGISTER_MODEL_ARGS(UMT5EncoderModel, [&] {
   LOAD_ARG_OR(dtype, "torch_dtype", "bfloat16");

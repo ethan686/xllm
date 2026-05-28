@@ -28,7 +28,7 @@ limitations under the License.
 
 namespace xllm {
 
-class VideoProcessorImpl : public VAEImageProcessorImpl {
+class VAEVideoProcessorImpl : public VAEImageProcessorImpl {
  public:
   using VAEImageProcessorImpl::VAEImageProcessorImpl;
 
@@ -178,6 +178,6 @@ class VideoProcessorImpl : public VAEImageProcessorImpl {
   }
 };
 
-TORCH_MODULE(VideoProcessor);
+TORCH_MODULE(VAEVideoProcessor);
 
 }  // namespace xllm

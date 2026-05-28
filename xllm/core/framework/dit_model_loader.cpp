@@ -441,6 +441,18 @@ bool DiTFolderLoader::load_tokenizer_args(
     if (!is_t5) {
       tokenizer_args_.tokenizer_type() = "fast";
       tokenizer_args_.vocab_file() = tokenizer_json_path;
+    } else {
+      // T5-family models use SentencePiece vocab. Probe for the vocab file
+      // (spiece.model for UMT5, tokenizer.model for T5) in the model directory.
+      for (const auto& candidate : {"spiece.model", "tokenizer.model"}) {
+        const std::string candidate_path =
+            model_weights_path_ + "/" + candidate;
+        if (std::filesystem::exists(candidate_path)) {
+          tokenizer_args_.tokenizer_type() = "sentencepiece";
+          tokenizer_args_.vocab_file() = candidate;
+          break;
+        }
+      }
     }
   }
 

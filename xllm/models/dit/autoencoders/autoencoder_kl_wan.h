@@ -1492,9 +1492,6 @@ class AutoencoderKLWanImpl : public torch::nn::Module {
     init_cached_conv_count();
   }
 
-  void enable_slicing(bool enable) { use_slicing_ = enable; }
-  void disable_slicing() { use_slicing_ = false; }
-
   void clear_cache() {
     conv_num_ = cached_conv_count_["decoder"];
     conv_idx_ = std::make_shared<std::vector<int64_t>>(std::vector<int64_t>{0});
@@ -1547,16 +1544,7 @@ class AutoencoderKLWanImpl : public torch::nn::Module {
   }
 
   AutoencoderKLOutput encode(const torch::Tensor& videos) {
-    torch::Tensor hidden_states;
-    if (use_slicing_) {
-      std::vector<torch::Tensor> latent_slices;
-      for (const auto& x_slice : videos.split(1)) {
-        latent_slices.push_back(encode_(x_slice));
-      }
-      hidden_states = torch::cat(latent_slices, 0);
-    } else {
-      hidden_states = encode_(videos);
-    }
+    auto hidden_states = encode_(videos);
     auto posterior = DiagonalGaussianDistribution(hidden_states);
     return AutoencoderKLOutput(posterior);
   }
@@ -1600,16 +1588,7 @@ class AutoencoderKLWanImpl : public torch::nn::Module {
   DecoderOutput decode(
       const torch::Tensor& latents,
       const std::optional<torch::Generator>& generator = std::nullopt) {
-    torch::Tensor videos;
-    if (use_slicing_ && latents.size(0) > 1) {
-      std::vector<torch::Tensor> video_slices;
-      for (const auto& latent_slice : latents.split(1)) {
-        video_slices.push_back(decode_(latent_slice).sample);
-      }
-      videos = torch::cat(video_slices, 0);
-    } else {
-      videos = decode_(latents).sample;
-    }
+    auto videos = decode_(latents).sample;
     return DecoderOutput(videos);
   }
 
@@ -1657,7 +1636,6 @@ class AutoencoderKLWanImpl : public torch::nn::Module {
   WanVAEDecoder3D decoder_{nullptr};
   WanCausalConv3D quant_conv_{nullptr};
   WanCausalConv3D post_quant_conv_{nullptr};
-  bool use_slicing_{false};
   ModelArgs args_;
   torch::Device device_;
   torch::ScalarType dtype_;
