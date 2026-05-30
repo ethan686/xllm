@@ -43,8 +43,6 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
     zdim_ = vae_args.z_dim();
     latents_mean_ = vae_args.vae_latents_mean();
     latents_std_ = vae_args.vae_latents_std();
-    LOG(INFO) << "Pipeline loaded latents_mean size=" << latents_mean_.size()
-              << " latents_std size=" << latents_std_.size();
 
     const auto& scheduler_args = context.get_model_args("scheduler");
     num_train_timesteps_ = scheduler_args.num_train_timesteps();
@@ -76,7 +74,7 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
   DiTForwardOutput forward(const DiTForwardInput& input) {
     const auto& generation_params = input.generation_params;
 
-    auto seed = generation_params.seed > 0 ? generation_params.seed : 42;
+    int64_t seed = generation_params.seed > 0 ? generation_params.seed : 42;
     auto images = input.images.defined() ? std::make_optional(input.images)
                                          : std::nullopt;
     auto last_images = input.last_images.defined()
@@ -259,7 +257,7 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
     std::vector<std::vector<int32_t>> text_input_ids;
     text_input_ids.reserve(batch_size);
 
-    for (int i = 0; i < prompt.size(); i++) {
+    for (int32_t i = 0; i < static_cast<int32_t>(prompt.size()); i++) {
       LOG(INFO) << "get_t5_prompt_embeds prompt content" << prompt[i];
     }
 
@@ -303,7 +301,7 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
             torch::zeros({padding_len, trimmed.size(1)}, trimmed.options());
         trimmed = torch::cat({trimmed, zeros}, 0);
       }
-      trimmed_embeds.push_back(trimmed);
+      trimmed_embeds.emplace_back(std::move(trimmed));
     }
     prompt_embeds = torch::stack(trimmed_embeds, 0);
 
@@ -342,7 +340,6 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
 
     if (do_classifier_free_guidance) {
       if (negative_prompt.has_value()) {
-        int prompt_size = negative_prompt.value().size();
         negative_prompt_embeds_tensor =
             get_t5_prompt_embeds(negative_prompt.value(),
                                  num_videos_per_prompt,
@@ -513,14 +510,14 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
         latent_model_input = latent_model_input.to(prepared_latents.dtype());
 
         if (!timestep_input.defined()) {
-          timestep_input = t.expand(prepared_latents.size(0));
+          timestep_input = t.expand({prepared_latents.size(0)});
         }
       }
       torch::Tensor noise_pred;
       torch::Tensor noise_uncond;
       if (do_classifier_free_guidance) {
         if (FLAGS_cfg_size == 2) {
-          auto rank = parallel_args_.dit_cfg_group_->rank();
+          int32_t rank = parallel_args_.dit_cfg_group_->rank();
           if (rank == 0) {
             noise_pred = current_model->forward(latent_model_input,
                                                 timestep_input,
@@ -591,9 +588,6 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
     prepared_latents = prepared_latents / latents_std;
     prepared_latents = prepared_latents + latents_mean;
     video = vae_->decode(prepared_latents.to(torch::kFloat32)).sample;
-    torch::save(
-        video,
-        "/export/home/weinan5/zjs/tensors_save_dir/cpp/vae_output_cpp.pt");
     video = video_processor_->postprocess_video(video);
 
     return video;

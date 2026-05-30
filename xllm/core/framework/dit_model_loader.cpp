@@ -449,7 +449,7 @@ bool DiTFolderLoader::load_tokenizer_args(
             model_weights_path_ + "/" + candidate;
         if (std::filesystem::exists(candidate_path)) {
           tokenizer_args_.tokenizer_type() = "sentencepiece";
-          tokenizer_args_.vocab_file() = candidate;
+          tokenizer_args_.vocab_file() = candidate_path;
           break;
         }
       }
