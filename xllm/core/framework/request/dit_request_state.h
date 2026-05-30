@@ -151,8 +151,6 @@ struct DiTInputParams {
   // Video-specific input fields
   torch::Tensor last_image;
 
-  torch::Tensor image_embeds;
-
   // Prompt audio for voice cloning (LongCat-AudioDiT).
   // Float32 PCM, shape (1, num_samples), mono 24 kHz.
   torch::Tensor prompt_audio;

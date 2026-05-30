@@ -38,7 +38,7 @@ using xllm::dit::DiTParallelLinear;
 using xllm::dit::LinearType;
 using xllm::dit::TpOptions;
 #include "framework/model_context.h"
-#include "models/dit/transformer_flux.h"
+#include "models/dit/transformers/transformer_flux.h"
 #include "models/model_registry.h"
 #if defined(USE_NPU)
 #include "torch_npu/csrc/aten/CustomFunctions.h"
@@ -1520,7 +1520,6 @@ REGISTER_MODEL_ARGS(WanTransformer3DModel, [&] {
   LOAD_ARG_OR(dtype, "dtype", "bfloat16");
   LOAD_ARG_OR(head_dim, "attention_head_dim", 128);
   LOAD_ARG_OR(cross_attn_norm, "cross_attn_norm", true);
-  LOAD_ARG_OR(eps, "eps", 1e-6);
   LOAD_ARG_OR(ffn_dim, "ffn_dim", 13824);
   LOAD_ARG_OR(time_freq_dim, "freq_dim", 256);
   LOAD_ARG_OR(dit_in_channels, "in_channels", 36);

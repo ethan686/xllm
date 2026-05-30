@@ -32,23 +32,12 @@ limitations under the License.
 #include "core/framework/model/model_input_params.h"
 #include "core/framework/state_dict/state_dict.h"
 #include "framework/model_context.h"
-#include "models/dit/autoencoder_kl.h"
+#include "models/dit/autoencoders/autoencoder_kl.h"
 #include "models/model_registry.h"
 #include "processors/input_processor.h"
 #include "processors/pywarpper_image_processor.h"
 
 namespace xllm {
-
-struct AutoencoderKLOutput {
-  DiagonalGaussianDistribution latent_dist;
-  AutoencoderKLOutput(DiagonalGaussianDistribution dist)
-      : latent_dist(std::move(dist)) {}
-};
-
-struct DecoderOutput {
-  torch::Tensor sample;
-  DecoderOutput(torch::Tensor sample) : sample(std::move(sample)) {}
-};
 
 class AvgDown3DImpl : public torch::nn::Module {
  public:
@@ -1466,9 +1455,9 @@ class AutoencoderKLWanImpl : public torch::nn::Module {
         device_(context.get_tensor_options().device()),
         dtype_(context.get_tensor_options().dtype().toScalarType()) {
     encoder_ = register_module("encoder",
-                               WanVAEEncoder3D(args_.vae_in_channels(),
+                               WanVAEEncoder3D(args_.in_channels(),
                                                args_.vae_base_dim(),
-                                               args_.vae_z_dim() * 2,
+                                               args_.z_dim() * 2,
                                                args_.vae_dim_mult(),
                                                args_.vae_num_res_blocks(),
                                                args_.vae_attn_scales(),
@@ -1481,13 +1470,13 @@ class AutoencoderKLWanImpl : public torch::nn::Module {
 
     decoder_ = register_module("decoder",
                                WanVAEDecoder3D(args_.vae_base_dim(),
-                                               args_.vae_z_dim(),
+                                               args_.z_dim(),
                                                args_.vae_dim_mult(),
                                                args_.vae_num_res_blocks(),
                                                args_.vae_attn_scales(),
                                                decoder_temporal,
                                                args_.vae_dropout(),
-                                               args_.vae_out_channels(),
+                                               args_.out_channels(),
                                                args_.vae_is_residual()));
 
     quant_conv_ =
@@ -1502,9 +1491,6 @@ class AutoencoderKLWanImpl : public torch::nn::Module {
             args_.z_dim(), args_.z_dim(), std::vector<int64_t>{1, 1, 1}));
     init_cached_conv_count();
   }
-
-  void enable_slicing(bool enable) { use_slicing_ = enable; }
-  void disable_slicing() { use_slicing_ = false; }
 
   void clear_cache() {
     conv_num_ = cached_conv_count_["decoder"];
@@ -1558,16 +1544,7 @@ class AutoencoderKLWanImpl : public torch::nn::Module {
   }
 
   AutoencoderKLOutput encode(const torch::Tensor& videos) {
-    torch::Tensor hidden_states;
-    if (use_slicing_) {
-      std::vector<torch::Tensor> latent_slices;
-      for (const auto& x_slice : videos.split(1)) {
-        latent_slices.push_back(encode_(x_slice));
-      }
-      hidden_states = torch::cat(latent_slices, 0);
-    } else {
-      hidden_states = encode_(videos);
-    }
+    auto hidden_states = encode_(videos);
     auto posterior = DiagonalGaussianDistribution(hidden_states);
     return AutoencoderKLOutput(posterior);
   }
@@ -1611,16 +1588,7 @@ class AutoencoderKLWanImpl : public torch::nn::Module {
   DecoderOutput decode(
       const torch::Tensor& latents,
       const std::optional<torch::Generator>& generator = std::nullopt) {
-    torch::Tensor videos;
-    if (use_slicing_ && latents.size(0) > 1) {
-      std::vector<torch::Tensor> video_slices;
-      for (const auto& latent_slice : latents.split(1)) {
-        video_slices.push_back(decode_(latent_slice).sample);
-      }
-      videos = torch::cat(video_slices, 0);
-    } else {
-      videos = decode_(latents).sample;
-    }
+    auto videos = decode_(latents).sample;
     return DecoderOutput(videos);
   }
 
@@ -1668,7 +1636,6 @@ class AutoencoderKLWanImpl : public torch::nn::Module {
   WanVAEDecoder3D decoder_{nullptr};
   WanCausalConv3D quant_conv_{nullptr};
   WanCausalConv3D post_quant_conv_{nullptr};
-  bool use_slicing_{false};
   ModelArgs args_;
   torch::Device device_;
   torch::ScalarType dtype_;
@@ -1708,7 +1675,6 @@ class AutoencoderKLWanImpl : public torch::nn::Module {
 TORCH_MODULE(AutoencoderKLWan);
 
 REGISTER_MODEL_ARGS(AutoencoderKLWan, [&] {
-  LOAD_ARG_OR(vae_z_dim, "z_dim", 16);
   LOAD_ARG_OR(z_dim, "z_dim", 16);
   LOAD_ARG_OR(vae_base_dim, "base_dim", 96);
   LOAD_ARG_OR(vae_num_res_blocks, "num_res_blocks", 2);
@@ -1718,8 +1684,8 @@ REGISTER_MODEL_ARGS(AutoencoderKLWan, [&] {
   LOAD_ARG_OR(vae_attn_scales, "attn_scales", (std::vector<double>{}));
   LOAD_ARG_OR(vae_dim_mult, "dim_mult", (std::vector<int64_t>{1, 2, 4, 4}));
   LOAD_ARG_OR(vae_dropout, "dropout", 0.0f);
-  LOAD_ARG_OR(vae_in_channels, "in_channels", 3);
-  LOAD_ARG_OR(vae_out_channels, "out_channels", 3);
+  LOAD_ARG_OR(in_channels, "in_channels", 3);
+  LOAD_ARG_OR(out_channels, "out_channels", 3);
   LOAD_ARG_OR(vae_is_residual, "is_residual", false);
   LOAD_ARG_OR(vae_scale_factor_temporal, "scale_factor_temporal", 4);
   LOAD_ARG_OR(vae_scale_factor_spatial, "scale_factor_spatial", 8);
