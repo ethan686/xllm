@@ -308,6 +308,17 @@ class DiTParallelLinearImpl : public torch::nn::Module {
           "weight",
           torch::empty({out_per_partition, in_features_}, weight_dtype),
           /*is_buffer=*/false);
+      // wsd
+      tp_weight_scale_ =
+          register_parameter("weight_scale",
+                             torch::empty({out_per_partition, 1}, weight_dtype),
+                             /*is_buffer=*/false);
+
+      tp_weight_offset_ =
+          register_parameter("weight_offset",
+                             torch::empty({out_per_partition, 1}, weight_dtype),
+                             /*is_buffer=*/false);
+
       if (has_bias_) {
         tp_bias_ = register_parameter(
             "bias",
@@ -320,6 +331,17 @@ class DiTParallelLinearImpl : public torch::nn::Module {
           "weight",
           torch::empty({out_features_, in_per_partition}, weight_dtype),
           /*is_buffer=*/false);
+
+      tp_weight_scale_ =
+          register_parameter("weight_scale",
+                             torch::empty({1, in_per_partition}, weight_dtype),
+                             /*is_buffer=*/false);
+
+      tp_weight_offset_ =
+          register_parameter("weight_offset",
+                             torch::empty({1, in_per_partition}, weight_dtype),
+                             /*is_buffer=*/false);
+
       if (has_bias_) {
         tp_bias_ =
             register_parameter("bias",

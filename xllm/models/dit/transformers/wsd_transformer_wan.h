@@ -174,22 +174,19 @@ class WanTimestepEmbeddingImpl : public torch::nn::Module {
   // wsd
   void load_state_dict(const StateDict& state_dict) {
     if (!quant_args_.quant_descs().empty()) {
-      LOG(INFO) << "进入量化分支";
       linear_1_->load_state_dict(state_dict.get_dict_with_prefix("0."));
       linear_2_->load_state_dict(state_dict.get_dict_with_prefix("2."));
     } else {
-      LOG(INFO) << "进入非量化分支";
       linear_1_->load_state_dict(state_dict.get_dict_with_prefix("linear_1."));
       linear_2_->load_state_dict(state_dict.get_dict_with_prefix("linear_2."));
     }
   }
   void verify_loaded_weights(const std::string& prefix) const {
+    // wsd
     if (!quant_args_.quant_descs().empty()) {
-      LOG(INFO) << "进入量化分支";
       linear_1_->verify_loaded_weights(prefix + "0.");
       linear_2_->verify_loaded_weights(prefix + "2.");
     } else {
-      LOG(INFO) << "进入非量化分支";
       linear_1_->verify_loaded_weights(prefix + "linear_1.");
       linear_2_->verify_loaded_weights(prefix + "linear_2.");
     }
@@ -279,8 +276,6 @@ class WanGELUImpl : public torch::nn::Module {
       : approximate_(approximate),
         options_(context.get_tensor_options()),
         parallel_args_(parallel_args) {
-    // wsd
-    quant_args_ = context.get_quant_args();
     LinearType linear_type =
         FLAGS_tp_size > 1 ? LinearType::TensorParallel : LinearType::Default;
     std::optional<TpOptions> tp_options = std::nullopt;
@@ -314,20 +309,12 @@ class WanGELUImpl : public torch::nn::Module {
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    if (!quant_args_.quant_descs().empty()) {
-      proj_->as<DiTParallelLinear>()->load_state_dict(state_dict);
-    } else {
-      proj_->as<DiTParallelLinear>()->load_state_dict(
-          state_dict.get_dict_with_prefix("proj."));
-    }
+    proj_->as<DiTParallelLinear>()->load_state_dict(
+        state_dict.get_dict_with_prefix("proj."));
   }
 
   void verify_loaded_weights(const std::string& prefix) const {
-    if (!quant_args_.quant_descs().empty()) {
-      proj_->as<DiTParallelLinear>()->verify_loaded_weights(prefix);
-    } else {
-      proj_->as<DiTParallelLinear>()->verify_loaded_weights(prefix + "proj.");
-    }
+    proj_->as<DiTParallelLinear>()->verify_loaded_weights(prefix + "proj.");
   }
 
  private:
@@ -356,8 +343,6 @@ class WanFeedForwardImpl : public torch::nn::Module {
     int64_t actual_inner_dim =
         (inner_dim > 0) ? inner_dim : static_cast<int64_t>(dim * mult);
     int64_t actual_dim_out = (dim_out > 0) ? dim_out : dim;
-    // wsd
-    quant_args_ = context.get_quant_args();
 
     if (activation_fn == "gelu") {
       act_fn_ = register_module("act_fn",
@@ -423,26 +408,21 @@ class WanFeedForwardImpl : public torch::nn::Module {
     }
     return output;
   }
-
   // wsd
   void load_state_dict(const StateDict& state_dict) {
     if (!quant_args_.quant_descs().empty()) {
-      LOG(INFO) << "进入量化分支";
       act_fn_->load_state_dict(state_dict.get_dict_with_prefix("0."));
       proj_out_->load_state_dict(state_dict.get_dict_with_prefix("2."));
     } else {
-      LOG(INFO) << "进入非量化分支";
       act_fn_->load_state_dict(state_dict.get_dict_with_prefix("net.0."));
       proj_out_->load_state_dict(state_dict.get_dict_with_prefix("net.2."));
     }
   }
   void verify_loaded_weights(const std::string& prefix) const {
     if (!quant_args_.quant_descs().empty()) {
-      LOG(INFO) << "进入量化分支";
       act_fn_->verify_loaded_weights(prefix + "0.");
       proj_out_->verify_loaded_weights(prefix + "2.");
     } else {
-      LOG(INFO) << "进入非量化分支";
       act_fn_->verify_loaded_weights(prefix + "net.0.");
       proj_out_->verify_loaded_weights(prefix + "net.2.");
     }
@@ -507,26 +487,21 @@ class WanPixArtAlphaTextProjectionImpl : public torch::nn::Module {
     hidden_states = linear_2_->forward(hidden_states);
     return hidden_states;
   }
-
   // wsd
   void load_state_dict(const StateDict& state_dict) {
     if (!quant_args_.quant_descs().empty()) {
-      LOG(INFO) << "进入量化分支";
       linear_1_->load_state_dict(state_dict.get_dict_with_prefix("0."));
       linear_2_->load_state_dict(state_dict.get_dict_with_prefix("2."));
     } else {
-      LOG(INFO) << "进入非量化分支";
       linear_1_->load_state_dict(state_dict.get_dict_with_prefix("linear_1."));
       linear_2_->load_state_dict(state_dict.get_dict_with_prefix("linear_2."));
     }
   }
   void verify_loaded_weights(const std::string& prefix) const {
     if (!quant_args_.quant_descs().empty()) {
-      LOG(INFO) << "进入量化分支";
       linear_1_->verify_loaded_weights(prefix + "0.");
       linear_2_->verify_loaded_weights(prefix + "2.");
     } else {
-      LOG(INFO) << "进入非量化分支";
       linear_1_->verify_loaded_weights(prefix + "linear_1.");
       linear_2_->verify_loaded_weights(prefix + "linear_2.");
     }
@@ -551,310 +526,17 @@ class WanAttentionImpl : public torch::nn::Module {
     auto model_args = context.get_model_args();
     // wsd
     quant_args_ = context.get_quant_args();
-    dim_ = model_args.head_dim() * model_args.n_heads();
-    heads_ = model_args.n_heads();
-    dim_head_ = model_args.head_dim();
-    added_kv_proj_dim_ = model_args.added_kv_proj_dim();
-    eps_ = 1e-6f;
-    dropout_ = 0.0f;
-
-    int64_t cross_dim_head = (cross_attention_dim_head > 0)
-                                 ? cross_attention_dim_head
-                                 : model_args.head_dim();
-    is_cross_attention_ = cross_dim_head > 0;
-
-    if (is_cross_attention_) {
-      kv_inner_dim_ = cross_dim_head * heads_;
-    } else {
-      kv_inner_dim_ = heads_ * dim_head_;
-    }
-    LinearType linear_type =
-        FLAGS_tp_size > 1 ? LinearType::TensorParallel : LinearType::Default;
-    std::optional<TpOptions> tp_options_qk = std::nullopt;
-    std::optional<TpOptions> tp_options_v = std::nullopt;
-    if (FLAGS_tp_size > 1) {
-      tp_options_qk = TpOptions(
-          /*column_parallel=*/true,
-          /*tp_rank=*/parallel_args_.dit_tp_group_->rank(),
-          /*tp_size=*/FLAGS_tp_size,
-          /*gather_output=*/true,
-          /*need_scatter=*/false,
-          /*process_group=*/parallel_args_.dit_tp_group_);
-      tp_options_v = TpOptions(
-          /*column_parallel=*/true,
-          /*tp_rank=*/parallel_args_.dit_tp_group_->rank(),
-          /*tp_size=*/FLAGS_tp_size,
-          /*gather_output=*/false,
-          /*need_scatter=*/false,
-          /*process_group=*/parallel_args_.dit_tp_group_);
-    }
     if (!quant_args_.quant_descs().empty()) {
-      LOG(INFO) << "进入量化分支";
-      auto to_q = DiTParallelLinear(dim_,
-                                    heads_ * dim_head_,
-                                    true,
-                                    options_,
-                                    linear_type,
-                                    // wsd
-                                    quant_args_,
-                                    std::nullopt,
-                                    tp_options_qk);
-      to_q_ = register_module("to_q", to_q);
-      auto to_k = DiTParallelLinear(dim_,
-                                    kv_inner_dim_,
-                                    true,
-                                    options_,
-                                    linear_type,
-                                    // wsd
-                                    quant_args_,
-                                    std::nullopt,
-                                    tp_options_qk);
-      to_k_ = register_module("to_k", to_k);
-      auto to_v = DiTParallelLinear(dim_,
-                                    kv_inner_dim_,
-                                    true,
-                                    options_,
-                                    linear_type,
-                                    // wsd
-                                    quant_args_,
-                                    std::nullopt,
-                                    tp_options_v);
-      to_v_ = register_module("to_v", to_v);
-    } else {
-      LOG(INFO) << "进入非量化分支";
-      auto to_q = DiTParallelLinear(dim_,
-                                    heads_ * dim_head_,
-                                    true,
-                                    options_,
-                                    linear_type,
-                                    std::nullopt,
-                                    tp_options_qk);
-      to_q_ = register_module("to_q", to_q);
-      auto to_k = DiTParallelLinear(dim_,
-                                    kv_inner_dim_,
-                                    true,
-                                    options_,
-                                    linear_type,
-                                    std::nullopt,
-                                    tp_options_qk);
-      to_k_ = register_module("to_k", to_k);
-      auto to_v = DiTParallelLinear(dim_,
-                                    kv_inner_dim_,
-                                    true,
-                                    options_,
-                                    linear_type,
-                                    std::nullopt,
-                                    tp_options_v);
-      to_v_ = register_module("to_v", to_v);
-    }
-    LinearType to_out_type =
-        FLAGS_tp_size > 1 ? LinearType::TensorParallel : LinearType::Default;
-    std::optional<TpOptions> tp_to_out_options = std::nullopt;
-    if (FLAGS_tp_size > 1) {
-      tp_to_out_options = TpOptions(
-          /*column_parallel=*/false,
-          /*tp_rank=*/parallel_args_.dit_tp_group_->rank(),
-          /*tp_size=*/FLAGS_tp_size,
-          /*gather_output=*/true,
-          /*need_scatter=*/false,
-          /*process_group=*/parallel_args_.dit_tp_group_);
-    }
-    if (!quant_args_.quant_descs().empty()) {
-      LOG(INFO) << "进入量化分支";
-      auto to_out = DiTParallelLinear(heads_ * dim_head_,
-                                      dim_,
-                                      true,
-                                      options_,
-                                      to_out_type,
-                                      // wsd
-                                      quant_args_,
-                                      std::nullopt,
-                                      tp_to_out_options);
-      to_out_ = register_module("to_out", to_out);
-    } else {
-      LOG(INFO) << "进入非量化分支";
-      auto to_out = DiTParallelLinear(heads_ * dim_head_,
-                                      dim_,
-                                      true,
-                                      options_,
-                                      to_out_type,
-                                      std::nullopt,
-                                      tp_to_out_options);
-      to_out_ = register_module("to_out", to_out);
-    }
-    norm_q_ = register_module(
-        "norm_q", layer::RMSNorm(dim_head_ * heads_, eps_, options_));
-    norm_k_ = register_module(
-        "norm_k", layer::RMSNorm(dim_head_ * heads_, eps_, options_));
-    if (added_kv_proj_dim_ > 0) {
-      LinearType add_kv_type =
-          FLAGS_tp_size > 1 ? LinearType::TensorParallel : LinearType::Default;
-      std::optional<TpOptions> add_k_options = std::nullopt;
-      std::optional<TpOptions> add_v_options = std::nullopt;
-      if (FLAGS_tp_size > 1) {
-        add_k_options = TpOptions(
-            /*column_parallel=*/true,
-            /*tp_rank=*/parallel_args_.dit_tp_group_->rank(),
-            /*tp_size=*/FLAGS_tp_size,
-            /*gather_output=*/false,
-            /*need_scatter=*/false,
-            /*process_group=*/parallel_args_.dit_tp_group_);
-        add_v_options = TpOptions(
-            /*column_parallel=*/true,
-            /*tp_rank=*/parallel_args_.dit_tp_group_->rank(),
-            /*tp_size=*/FLAGS_tp_size,
-            /*gather_output=*/false,
-            /*need_scatter=*/false,
-            /*process_group=*/parallel_args_.dit_tp_group_);
-      }
-      auto add_k_proj = DiTParallelLinear(added_kv_proj_dim_,
-                                          heads_ * dim_head_,
-                                          true,
-                                          options_,
-                                          add_kv_type,
-                                          std::nullopt,
-                                          add_k_options);
-      add_k_proj_ = register_module("add_k_proj", add_k_proj);
-      auto add_v_proj = DiTParallelLinear(added_kv_proj_dim_,
-                                          heads_ * dim_head_,
-                                          true,
-                                          options_,
-                                          add_kv_type,
-                                          std::nullopt,
-                                          add_v_options);
-      add_v_proj_ = register_module("add_v_proj", add_v_proj);
-      norm_added_k_ = register_module(
-          "norm_added_k", layer::RMSNorm(dim_head_ * heads_, eps_, options_));
-    }
-  }
-
-  torch::Tensor at_npu_attention(const torch::Tensor& q,
-                                 const torch::Tensor& k,
-                                 const torch::Tensor& v) {
-    const auto q_t = q.transpose(1, 2);
-    const auto k_t = k.transpose(1, 2);
-    const auto v_t = v.transpose(1, 2);
-
-#if defined(USE_NPU)
-    const int64_t head_num = q_t.size(1);
-    const int64_t head_dim = q_t.size(-1);
-    const auto results = at_npu::native::custom_ops::npu_fusion_attention(
-        q_t,
-        k_t,
-        v_t,
-        head_num,
-        "BNSD",
-        torch::nullopt,
-        torch::nullopt,
-        torch::nullopt,
-        std::pow(head_dim, -0.5),
-        1.0,
-        65535,
-        65535);
-    torch::Tensor out = std::get<0>(results).transpose(1, 2);
-#else
-    const double scale = 1.0 / std::sqrt(static_cast<double>(dim_head_));
-    auto attn_weights = torch::matmul(q_t, k_t.transpose(-2, -1)) * scale;
-    attn_weights = torch::softmax(attn_weights, -1);
-    torch::Tensor out = torch::matmul(attn_weights, v_t).transpose(1, 2);
-#endif
-    return out.flatten(2, 3).to(q.dtype());
-  }
-
-  torch::Tensor forward(
-      const torch::Tensor& hidden_states_in,
-      const torch::Tensor& encoder_hidden_states = torch::Tensor(),
-      std::optional<std::pair<torch::Tensor, torch::Tensor>> rotary_emb =
-          std::nullopt) {
-    torch::Tensor hidden_states = hidden_states_in;
-    bool is_self_attention =
-        !encoder_hidden_states.defined() ||
-        (encoder_hidden_states.size(1) == hidden_states.size(1));
-
-    torch::Tensor encoder_hidden_states_text =
-        encoder_hidden_states.defined() ? encoder_hidden_states : hidden_states;
-    torch::Tensor encoder_hidden_states_img;
-
-    if (!is_self_attention && add_k_proj_ &&
-        encoder_hidden_states_text.defined() &&
-        encoder_hidden_states_text.size(1) > 512) {
-      int64_t image_context_length = encoder_hidden_states_text.size(1) - 512;
-      encoder_hidden_states_img =
-          encoder_hidden_states_text.slice(1, 0, image_context_length);
-      encoder_hidden_states_text =
-          encoder_hidden_states_text.slice(1, image_context_length);
-    }
-
-    torch::Tensor query = to_q_->forward(hidden_states);
-    torch::Tensor key = to_k_->forward(encoder_hidden_states_text);
-    torch::Tensor value = to_v_->forward(encoder_hidden_states_text);
-    query = std::get<0>(norm_q_->forward(query));
-    key = std::get<0>(norm_k_->forward(key));
-
-    if (FLAGS_tp_size > 1) {
-      query = parallel_state::scatter(
-          query, parallel_args_.dit_tp_group_, /*dim=*/-1);
-      key = parallel_state::scatter(
-          key, parallel_args_.dit_tp_group_, /*dim=*/-1);
-    }
-
-    int64_t batch_size = query.size(0);
-    int64_t n_heads = heads_;
-    if (FLAGS_tp_size > 1) {
-      n_heads = heads_ / FLAGS_tp_size;
-    }
-    query = query.view({batch_size, -1, n_heads, dim_head_});
-    key = key.view({batch_size, -1, n_heads, dim_head_});
-    value = value.view({batch_size, -1, n_heads, dim_head_});
-
-    if (rotary_emb.has_value()) {
-      torch::Tensor freqs_cos = rotary_emb->first;
-      torch::Tensor freqs_sin = rotary_emb->second;
-      query = wan_apply_rotary_emb(query, freqs_cos, freqs_sin);
-      key = wan_apply_rotary_emb(key, freqs_cos, freqs_sin);
-    }
-
-    torch::Tensor hidden_states_img;
-    if (encoder_hidden_states_img.defined()) {
-      torch::Tensor key_img = add_k_proj_->forward(encoder_hidden_states_img);
-      torch::Tensor value_img = add_v_proj_->forward(encoder_hidden_states_img);
-
-      key_img = std::get<0>(norm_added_k_->forward(key_img));
-
-      if (FLAGS_tp_size > 1) {
-        key_img = parallel_state::scatter(
-            key_img, parallel_args_.dit_tp_group_, /*dim=*/-1);
-      }
-
-      key_img = key_img.view({batch_size, -1, n_heads, dim_head_});
-      value_img = value_img.view({batch_size, -1, n_heads, dim_head_});
-      hidden_states_img = at_npu_attention(query, key_img, value_img);
-    }
-    hidden_states = at_npu_attention(query, key, value);
-    if (hidden_states_img.defined()) {
-      hidden_states = hidden_states + hidden_states_img;
-    }
-
-    hidden_states = to_out_->forward(hidden_states);
-
-    return hidden_states;
-  }
-  void load_state_dict(const StateDict& state_dict) {
-    // wsd
-    if (!quant_args_.quant_descs().empty()) {
-      LOG(INFO) << "进入量化分支";
       to_q_->load_state_dict(state_dict.get_dict_with_prefix("q."));
       to_k_->load_state_dict(state_dict.get_dict_with_prefix("k."));
       to_v_->load_state_dict(state_dict.get_dict_with_prefix("v."));
       to_out_->load_state_dict(state_dict.get_dict_with_prefix("o."));
     } else {
-      LOG(INFO) << "进入非量化分支";
       to_q_->load_state_dict(state_dict.get_dict_with_prefix("to_q."));
       to_k_->load_state_dict(state_dict.get_dict_with_prefix("to_k."));
       to_v_->load_state_dict(state_dict.get_dict_with_prefix("to_v."));
       to_out_->load_state_dict(state_dict.get_dict_with_prefix("to_out.0."));
     }
-
     norm_q_->load_state_dict(state_dict.get_dict_with_prefix("norm_q."));
     norm_k_->load_state_dict(state_dict.get_dict_with_prefix("norm_k."));
 
@@ -870,13 +552,11 @@ class WanAttentionImpl : public torch::nn::Module {
 
   void verify_loaded_weights(const std::string& prefix) const {
     if (!quant_args_.quant_descs().empty()) {
-      LOG(INFO) << "进入量化分支";
       to_q_->verify_loaded_weights(prefix + "q.");
       to_k_->verify_loaded_weights(prefix + "k.");
       to_v_->verify_loaded_weights(prefix + "v.");
       to_out_->verify_loaded_weights(prefix + "o.");
     } else {
-      LOG(INFO) << "进入非量化分支";
       to_q_->verify_loaded_weights(prefix + "to_q.");
       to_k_->verify_loaded_weights(prefix + "to_k.");
       to_v_->verify_loaded_weights(prefix + "to_v.");
@@ -923,6 +603,7 @@ class WanImageEmbeddingImpl : public torch::nn::Module {
   explicit WanImageEmbeddingImpl(const ModelContext& context)
       : options_(context.get_tensor_options()) {
     auto model_args = context.get_model_args();
+    quant_args_ = context.get_quant_args();
     auto parallel_args = context.get_parallel_args();
     in_features_ = model_args.image_embed_dim();
     out_features_ = model_args.head_dim() * model_args.n_heads();
@@ -1006,14 +687,13 @@ class WanTimeTextImageEmbeddingImpl : public torch::nn::Module {
   explicit WanTimeTextImageEmbeddingImpl(const ModelContext& context)
       : options_(context.get_tensor_options()) {
     auto model_args = context.get_model_args();
+    quant_args_ = context.get_quant_args();
     dim_ = model_args.head_dim() * model_args.n_heads();
     time_freq_dim_ = model_args.time_freq_dim();
     time_proj_dim_ = dim_ * 6;
     text_embed_dim_ = model_args.text_embed_dim();
     image_embed_dim_ = model_args.image_embed_dim();
     pos_embed_seq_len_ = model_args.pos_embed_seq_len();
-    // wsd
-    quant_args_ = context.get_quant_args();
 
     timesteps_proj_ = register_module(
         "timesteps_proj", WanTimesteps(time_freq_dim_, true, 0.0f, 1));
@@ -1028,10 +708,8 @@ class WanTimeTextImageEmbeddingImpl : public torch::nn::Module {
 
     text_embedder_ =
         register_module("text_embedder",
-                        // wsd
                         WanPixArtAlphaTextProjection(
                             context, text_embed_dim_, dim_, dim_, "gelu_tanh"));
-    // WanPixArtAlphaTextProjection(text_embed_dim_, dim_, dim_, "gelu_tanh"));
 
     if (image_embed_dim_ > 0) {
       image_embedder_ =
@@ -1072,14 +750,14 @@ class WanTimeTextImageEmbeddingImpl : public torch::nn::Module {
     return {temb, timestep_proj_out, text_emb, image_emb};
   }
 
+  // 函数只定义一次，if/else 写在函数内部
   void load_state_dict(const StateDict& state_dict) {
     // wsd
     if (!quant_args_.quant_descs().empty()) {
-      LOG(INFO) << "进入量化分支";
       time_embedder_->load_state_dict(
           state_dict.get_dict_with_prefix("time_embedding."));
       time_proj_->load_state_dict(
-          state_dict.get_dict_with_prefix("time_projection.1."));
+          state_dict.get_dict_with_prefix("time_projection."));
       text_embedder_->load_state_dict(
           state_dict.get_dict_with_prefix("text_embedding."));
       if (image_embedder_) {
@@ -1087,7 +765,6 @@ class WanTimeTextImageEmbeddingImpl : public torch::nn::Module {
             state_dict.get_dict_with_prefix("image_embedder."));
       }
     } else {
-      LOG(INFO) << "进入非量化分支";
       time_embedder_->load_state_dict(
           state_dict.get_dict_with_prefix("time_embedder."));
       time_proj_->load_state_dict(
@@ -1104,15 +781,13 @@ class WanTimeTextImageEmbeddingImpl : public torch::nn::Module {
   void verify_loaded_weights(const std::string& prefix) const {
     // wsd
     if (!quant_args_.quant_descs().empty()) {
-      LOG(INFO) << "进入量化分支";
       time_embedder_->verify_loaded_weights(prefix + "time_embedding.");
-      time_proj_->verify_loaded_weights(prefix + "time_projection.1.");
+      time_proj_->verify_loaded_weights(prefix + "time_projection.");
       text_embedder_->verify_loaded_weights(prefix + "text_embedding.");
       if (image_embedder_) {
         image_embedder_->verify_loaded_weights(prefix + "image_embedder.");
       }
     } else {
-      LOG(INFO) << "进入非量化分支";
       time_embedder_->verify_loaded_weights(prefix + "time_embedder.");
       time_proj_->verify_loaded_weights(prefix + "time_proj.");
       text_embedder_->verify_loaded_weights(prefix + "text_embedder.");
@@ -1148,6 +823,7 @@ class WanRotaryPosEmbedImpl : public torch::nn::Module {
   explicit WanRotaryPosEmbedImpl(const ModelContext& context)
       : options_(context.get_tensor_options()) {
     auto model_args = context.get_model_args();
+    quant_args_ = context.get_quant_args();
     attention_head_dim_ = model_args.head_dim();
     patch_size_ = model_args.wan_patch_size();
     max_seq_len_ = model_args.rope_max_seq_len();
@@ -1254,7 +930,6 @@ class WanRotaryPosEmbedImpl : public torch::nn::Module {
   int64_t t_dim_;
   int64_t h_dim_;
   int64_t w_dim_;
-
   // wsd
   QuantArgs quant_args_;
   torch::Tensor freqs_cos_;
@@ -1273,7 +948,6 @@ class WanTransformerBlockImpl : public torch::nn::Module {
         parallel_args_(parallel_args),
         block_idx_(block_idx) {
     auto model_args = context.get_model_args();
-    // wsd
     quant_args_ = context.get_quant_args();
     dim_ = model_args.head_dim() * model_args.n_heads();
     ffn_dim_ = model_args.ffn_dim();
@@ -1370,7 +1044,6 @@ class WanTransformerBlockImpl : public torch::nn::Module {
   void load_state_dict(const StateDict& state_dict) {
     // wsd
     if (!quant_args_.quant_descs().empty()) {
-      LOG(INFO) << "进入量化分支";
       attn1_->load_state_dict(state_dict.get_dict_with_prefix("self_attn."));
       attn2_->load_state_dict(state_dict.get_dict_with_prefix("cross_attn."));
       if (cross_attn_norm_ && norm2_) {
@@ -1378,11 +1051,10 @@ class WanTransformerBlockImpl : public torch::nn::Module {
       }
       ff_->load_state_dict(state_dict.get_dict_with_prefix("ffn."));
       weight::load_weight(state_dict,
-                          "modulation",
+                          "head.modulation",
                           scale_shift_table_,
                           scale_shift_table_loaded_);
     } else {
-      LOG(INFO) << "进入非量化分支";
       attn1_->load_state_dict(state_dict.get_dict_with_prefix("attn1."));
       attn2_->load_state_dict(state_dict.get_dict_with_prefix("attn2."));
       if (cross_attn_norm_ && norm2_) {
@@ -1399,7 +1071,6 @@ class WanTransformerBlockImpl : public torch::nn::Module {
   void verify_loaded_weights(const std::string& prefix) const {
     // wsd
     if (!quant_args_.quant_descs().empty()) {
-      LOG(INFO) << "进入量化分支";
       attn1_->verify_loaded_weights(prefix + "self_attn.");
       if (cross_attn_norm_) {
         norm2_->verify_loaded_weights(prefix + "norm3.");
@@ -1407,9 +1078,8 @@ class WanTransformerBlockImpl : public torch::nn::Module {
       attn2_->verify_loaded_weights(prefix + "cross_attn.");
       ff_->verify_loaded_weights(prefix + "ffn.");
       CHECK(scale_shift_table_loaded_)
-          << "modulation is not loaded for " << prefix + "modulation";
+          << "head.modulation is not loaded for " << prefix + "head.modulation";
     } else {
-      LOG(INFO) << "进入非量化分支";
       attn1_->verify_loaded_weights(prefix + "attn1.");
       if (cross_attn_norm_) {
         norm2_->verify_loaded_weights(prefix + "norm2.");
@@ -1439,7 +1109,6 @@ class WanTransformerBlockImpl : public torch::nn::Module {
   FP32LayerNorm norm3_{nullptr};
   torch::Tensor scale_shift_table_;
   bool scale_shift_table_loaded_{false};
-
   // wsd
   QuantArgs quant_args_;
   torch::TensorOptions options_;
@@ -1452,7 +1121,6 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
   explicit WanTransformer3DModelImpl(const ModelContext& context)
       : options_(context.get_tensor_options()) {
     auto model_args = context.get_model_args();
-    // wsd
     quant_args_ = context.get_quant_args();
     auto parallel_args = context.get_parallel_args();
     patch_size_ = model_args.wan_patch_size();
@@ -1532,6 +1200,9 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
     int64_t post_patch_num_frames = num_frames / p_t;
     int64_t post_patch_height = height / p_h;
     int64_t post_patch_width = width / p_w;
+
+    LOG(INFO) << "quant_args_.quant_descs()"
+              << quant_args_.quant_descs().size();
 
     torch::Tensor hidden_states = hidden_states_in;
 
@@ -1619,7 +1290,6 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
     hidden_states = hidden_states.flatten(6, 7).flatten(4, 5).flatten(2, 3);
     return hidden_states;
   }
-
   void load_state_dict(const StateDict& state_dict) {
     weight::load_weight(state_dict,
                         "patch_embedding.weight",
@@ -1630,32 +1300,28 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
                         patch_embedding_->bias,
                         pad_embedding_bias_loaded_);
 
+    // 原来的 if/else 逻辑，现在写在函数内部
     // wsd
     if (!quant_args_.quant_descs().empty()) {
-      LOG(INFO) << "进入量化分支";
       condition_embedder_->load_state_dict(state_dict);
       proj_out_->load_state_dict(state_dict.get_dict_with_prefix("head.head."));
-      for (int64_t i = 0; i < transformer_layers_.size(); ++i) {
-        transformer_layers_[i]->load_state_dict(state_dict.get_dict_with_prefix(
-            "blocks." + std::to_string(i) + "."));
-      }
       weight::load_weight(state_dict,
                           "head.modulation",
                           scale_shift_table_,
                           scale_shift_table_loaded_);
     } else {
-      LOG(INFO) << "进入非量化分支";
       condition_embedder_->load_state_dict(
           state_dict.get_dict_with_prefix("condition_embedder."));
       proj_out_->load_state_dict(state_dict.get_dict_with_prefix("proj_out."));
-      for (int64_t i = 0; i < transformer_layers_.size(); ++i) {
-        transformer_layers_[i]->load_state_dict(state_dict.get_dict_with_prefix(
-            "blocks." + std::to_string(i) + "."));
-      }
       weight::load_weight(state_dict,
                           "scale_shift_table",
                           scale_shift_table_,
                           scale_shift_table_loaded_);
+    }
+
+    for (int64_t i = 0; i < transformer_layers_.size(); ++i) {
+      transformer_layers_[i]->load_state_dict(
+          state_dict.get_dict_with_prefix("blocks." + std::to_string(i) + "."));
     }
   }
 
@@ -1665,28 +1331,24 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
     CHECK(pad_embedding_bias_loaded_) << "patch_embedding is not loaded for"
                                       << prefix << "pad_embedding.bias";
 
+    // 原来的 if/else 逻辑，现在写在函数内部
     // wsd
     if (!quant_args_.quant_descs().empty()) {
-      LOG(INFO) << "进入量化分支";
       condition_embedder_->verify_loaded_weights(prefix);
-      for (size_t i = 0; i < transformer_layers_.size(); ++i) {
-        transformer_layers_[i]->verify_loaded_weights(prefix + "blocks." +
-                                                      std::to_string(i) + ".");
-      }
       proj_out_->verify_loaded_weights(prefix + "head.head.");
       CHECK(scale_shift_table_loaded_)
           << "head.modulation is not loaded for " << prefix + "head.modulation";
     } else {
-      LOG(INFO) << "进入非量化分支";
       condition_embedder_->verify_loaded_weights(prefix +
                                                  "condition_embedder.");
-      for (size_t i = 0; i < transformer_layers_.size(); ++i) {
-        transformer_layers_[i]->verify_loaded_weights(prefix + "blocks." +
-                                                      std::to_string(i) + ".");
-      }
       proj_out_->verify_loaded_weights(prefix + "proj_out.");
       CHECK(scale_shift_table_loaded_) << "scale_shift_table is not loaded for "
                                        << prefix + "scale_shift_table";
+    }
+
+    for (size_t i = 0; i < transformer_layers_.size(); ++i) {
+      transformer_layers_[i]->verify_loaded_weights(prefix + "blocks." +
+                                                    std::to_string(i) + ".");
     }
   }
 

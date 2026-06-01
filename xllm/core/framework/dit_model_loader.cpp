@@ -545,6 +545,9 @@ bool DiTFolderLoader::load_quant_args(const std::string& model_weights_path) {
       }
     }
   }
+  // wsd
+  std::cout << "找到的 quant 描述文件路径：" << quant_desc_file_path
+            << std::endl;
   if (quant_desc_file_path.empty()) {
     return true;  // No quant config — not an error.
   }
