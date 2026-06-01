@@ -298,6 +298,7 @@ class WanGELUImpl : public torch::nn::Module {
                                   with_bias,
                                   options_,
                                   linear_type,
+                                  quant_args_,
                                   std::nullopt,
                                   tp_options);
     proj_ = register_module("proj", proj);
@@ -404,6 +405,7 @@ class WanFeedForwardImpl : public torch::nn::Module {
                                       with_bias,
                                       options_,
                                       linear_out_type,
+                                      quant_args_,
                                       std::nullopt,
                                       tp_out_options);
     proj_out_ = register_module("proj_out", proj_out);
@@ -627,6 +629,7 @@ class WanAttentionImpl : public torch::nn::Module {
                                     true,
                                     options_,
                                     linear_type,
+                                    QuantArgs(),
                                     std::nullopt,
                                     tp_options_qk);
       to_q_ = register_module("to_q", to_q);
@@ -635,6 +638,7 @@ class WanAttentionImpl : public torch::nn::Module {
                                     true,
                                     options_,
                                     linear_type,
+                                    QuantArgs(),
                                     std::nullopt,
                                     tp_options_qk);
       to_k_ = register_module("to_k", to_k);
@@ -643,6 +647,7 @@ class WanAttentionImpl : public torch::nn::Module {
                                     true,
                                     options_,
                                     linear_type,
+                                    QuantArgs(),
                                     std::nullopt,
                                     tp_options_v);
       to_v_ = register_module("to_v", to_v);
@@ -678,6 +683,7 @@ class WanAttentionImpl : public torch::nn::Module {
                                       true,
                                       options_,
                                       to_out_type,
+                                      QuantArgs(),
                                       std::nullopt,
                                       tp_to_out_options);
       to_out_ = register_module("to_out", to_out);
@@ -712,6 +718,7 @@ class WanAttentionImpl : public torch::nn::Module {
                                           true,
                                           options_,
                                           add_kv_type,
+                                          QuantArgs(),
                                           std::nullopt,
                                           add_k_options);
       add_k_proj_ = register_module("add_k_proj", add_k_proj);
@@ -720,6 +727,7 @@ class WanAttentionImpl : public torch::nn::Module {
                                           true,
                                           options_,
                                           add_kv_type,
+                                          QuantArgs(),
                                           std::nullopt,
                                           add_v_options);
       add_v_proj_ = register_module("add_v_proj", add_v_proj);
