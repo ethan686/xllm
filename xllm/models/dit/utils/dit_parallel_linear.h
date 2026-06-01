@@ -477,22 +477,38 @@ class DiTParallelLinearImpl : public torch::nn::Module {
                                   tp.tp_size,
                                   tp_weight_,
                                   tp_weight_loaded_);
-      int64_t scale_axis = 0;
-      weight::load_sharded_weight(state_dict,
-                                  "weight_scale",
-                                  scale_axis,
-                                  tp.tp_rank,
-                                  tp.tp_size,
-                                  tp_weight_scale_,
-                                  tp_weight_scale_is_loaded_);
-      if (state_dict.has("weight_offset")) {
+      // Column-parallel: each rank owns a shard of output channels,
+      // so weight_scale / weight_offset are sharded along dim 0.
+      // Row-parallel: all ranks need the full per-output-channel scale,
+      // so load without sharding.
+      if (tp.column_parallel) {
         weight::load_sharded_weight(state_dict,
-                                    "weight_offset",
-                                    scale_axis,
+                                    "weight_scale",
+                                    /*axis=*/0,
                                     tp.tp_rank,
                                     tp.tp_size,
-                                    tp_weight_offset_,
-                                    tp_weight_offset_is_loaded_);
+                                    tp_weight_scale_,
+                                    tp_weight_scale_is_loaded_);
+        if (state_dict.has("weight_offset")) {
+          weight::load_sharded_weight(state_dict,
+                                      "weight_offset",
+                                      /*axis=*/0,
+                                      tp.tp_rank,
+                                      tp.tp_size,
+                                      tp_weight_offset_,
+                                      tp_weight_offset_is_loaded_);
+        }
+      } else {
+        weight::load_weight(state_dict,
+                            "weight_scale",
+                            tp_weight_scale_,
+                            tp_weight_scale_is_loaded_);
+        if (state_dict.has("weight_offset")) {
+          weight::load_weight(state_dict,
+                              "weight_offset",
+                              tp_weight_offset_,
+                              tp_weight_offset_is_loaded_);
+        }
       }
     } else {
       if (tp.column_parallel) {
