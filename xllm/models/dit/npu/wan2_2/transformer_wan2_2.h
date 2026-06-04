@@ -36,6 +36,7 @@ limitations under the License.
 
 using xllm::dit::DiTParallelLinear;
 using xllm::dit::LinearType;
+using xllm::dit::SpOptions;
 using xllm::dit::TpOptions;
 #include "framework/model_context.h"
 #include "models/dit/transformer_flux.h"
@@ -63,6 +64,76 @@ inline torch::Tensor wan_apply_rotary_emb(const torch::Tensor& hidden_states,
   auto out = torch::stack({out1, out2}, -1).flatten(-2, -1);
 
   return out.to(input_dtype);
+}
+
+inline torch::Tensor sp_split_sequence(const torch::Tensor& input,
+                                       int64_t dim,
+                                       ProcessGroup* sp_group) {
+  int64_t dim_size = input.size(dim);
+  return input.narrow(dim,
+                      sp_group->rank() * (dim_size / sp_group->world_size()),
+                      dim_size / sp_group->world_size());
+}
+
+inline torch::Tensor sp_gather_sequence(const torch::Tensor& input,
+                                        int64_t dim,
+                                        ProcessGroup* sp_group) {
+  auto tensor_list = parallel_state::gather(input, sp_group, dim);
+  return torch::cat(tensor_list, dim);
+}
+
+inline int64_t sp_pad_sequence(
+    torch::Tensor& hidden_states,
+    torch::Tensor& freqs_cos,
+    torch::Tensor& freqs_sin,
+    std::pair<torch::Tensor, torch::Tensor>& rotary_emb,
+    ProcessGroup* sp_group) {
+  if (!sp_group || sp_group->world_size() <= 1) return hidden_states.size(1);
+  auto group_size = sp_group->world_size();
+  int64_t seq_len = hidden_states.size(1);
+  if (seq_len % group_size == 0) return seq_len;
+  int64_t pad_seq_len = ((seq_len + group_size - 1) / group_size) * group_size;
+  hidden_states = torch::nn::functional::pad(
+      hidden_states,
+      torch::nn::functional::PadFuncOptions({0, 0, 0, pad_seq_len - seq_len}));
+  freqs_cos =
+      torch::nn::functional::pad(freqs_cos,
+                                 torch::nn::functional::PadFuncOptions(
+                                     {0, 0, 0, 0, 0, pad_seq_len - seq_len}));
+  freqs_sin =
+      torch::nn::functional::pad(freqs_sin,
+                                 torch::nn::functional::PadFuncOptions(
+                                     {0, 0, 0, 0, 0, pad_seq_len - seq_len}));
+  rotary_emb = std::make_pair(freqs_cos, freqs_sin);
+  return pad_seq_len;
+}
+
+inline torch::Tensor sp_all_to_all(const torch::Tensor& input,
+                                   int64_t heads,
+                                   int64_t dim_head,
+                                   int64_t tp_size,
+                                   ProcessGroup* sp_group) {
+  auto fn = parallel_state::all_to_all_4D(
+      input.view({input.size(0), -1, heads / tp_size, dim_head}),
+      /*scatter_dim=*/2,
+      /*gather_dim=*/1,
+      /*async=*/false,
+      sp_group);
+  return fn().view({input.size(0),
+                    -1,
+                    heads * dim_head / (tp_size * sp_group->world_size())});
+}
+
+inline torch::Tensor sp_slice_heads(const torch::Tensor& input,
+                                    int64_t heads,
+                                    int64_t dim_head,
+                                    int64_t tp_size,
+                                    ProcessGroup* sp_group) {
+  int64_t n_heads = heads / (tp_size * sp_group->world_size());
+  return input
+      .view({input.size(0), -1, n_heads * sp_group->world_size(), dim_head})
+      .slice(2, sp_group->rank() * n_heads, (sp_group->rank() + 1) * n_heads)
+      .flatten(2, 3);
 }
 
 class FP32LayerNormImpl : public torch::nn::Module {
@@ -371,6 +442,7 @@ class WanFeedForwardImpl : public torch::nn::Module {
     if (final_dropout_) {
       output = final_dropout_->forward(output);
     }
+
     return output;
   }
 
@@ -483,6 +555,11 @@ class WanAttentionImpl : public torch::nn::Module {
     }
     LinearType linear_type =
         FLAGS_tp_size > 1 ? LinearType::TensorParallel : LinearType::Default;
+    LinearType linear_type_v =
+        (cross_attention_dim_head <= 0 && FLAGS_sp_size > 1)
+            ? (FLAGS_tp_size > 1 ? LinearType::TensorAndSequenceParallel
+                                 : LinearType::SequenceParallel)
+            : linear_type;
     std::optional<TpOptions> tp_options_qk = std::nullopt;
     std::optional<TpOptions> tp_options_v = std::nullopt;
     if (FLAGS_tp_size > 1) {
@@ -500,6 +577,15 @@ class WanAttentionImpl : public torch::nn::Module {
           /*gather_output=*/false,
           /*need_scatter=*/false,
           /*process_group=*/parallel_args_.dit_tp_group_);
+    }
+    std::optional<SpOptions> sp_options_v = std::nullopt;
+    if (cross_attention_dim_head <= 0 && FLAGS_sp_size > 1) {
+      sp_options_v = SpOptions(
+          /*head_num=*/heads_,
+          /*head_dim=*/dim_head_,
+          /*hidden_size=*/dim_,
+          /*before_attention=*/true,
+          /*process_group=*/parallel_args_.dit_sp_group_);
     }
     auto to_q = DiTParallelLinear(dim_,
                                   heads_ * dim_head_,
@@ -521,12 +607,15 @@ class WanAttentionImpl : public torch::nn::Module {
                                   kv_inner_dim_,
                                   true,
                                   options_,
-                                  linear_type,
-                                  std::nullopt,
+                                  linear_type_v,
+                                  sp_options_v,
                                   tp_options_v);
     to_v_ = register_module("to_v", to_v);
-    LinearType to_out_type =
-        FLAGS_tp_size > 1 ? LinearType::TensorParallel : LinearType::Default;
+    LinearType to_out_type = linear_type;
+    if (FLAGS_sp_size > 1) {
+      to_out_type = FLAGS_tp_size > 1 ? LinearType::TensorAndSequenceParallel
+                                      : LinearType::SequenceParallel;
+    }
     std::optional<TpOptions> tp_to_out_options = std::nullopt;
     if (FLAGS_tp_size > 1) {
       tp_to_out_options = TpOptions(
@@ -537,12 +626,21 @@ class WanAttentionImpl : public torch::nn::Module {
           /*need_scatter=*/false,
           /*process_group=*/parallel_args_.dit_tp_group_);
     }
+    std::optional<SpOptions> sp_options_out = std::nullopt;
+    if (FLAGS_sp_size > 1) {
+      sp_options_out = SpOptions(
+          /*head_num=*/heads_,
+          /*head_dim=*/dim_head_,
+          /*hidden_size=*/dim_,
+          /*before_attention=*/false,
+          /*process_group=*/parallel_args_.dit_sp_group_);
+    }
     auto to_out = DiTParallelLinear(heads_ * dim_head_,
                                     dim_,
                                     true,
                                     options_,
                                     to_out_type,
-                                    std::nullopt,
+                                    sp_options_out,
                                     tp_to_out_options);
     to_out_ = register_module("to_out", to_out);
     norm_q_ = register_module(
@@ -550,8 +648,6 @@ class WanAttentionImpl : public torch::nn::Module {
     norm_k_ = register_module(
         "norm_k", layer::RMSNorm(dim_head_ * heads_, eps_, options_));
     if (added_kv_proj_dim_ > 0) {
-      LinearType add_kv_type =
-          FLAGS_tp_size > 1 ? LinearType::TensorParallel : LinearType::Default;
       std::optional<TpOptions> add_k_options = std::nullopt;
       std::optional<TpOptions> add_v_options = std::nullopt;
       if (FLAGS_tp_size > 1) {
@@ -559,7 +655,7 @@ class WanAttentionImpl : public torch::nn::Module {
             /*column_parallel=*/true,
             /*tp_rank=*/parallel_args_.dit_tp_group_->rank(),
             /*tp_size=*/FLAGS_tp_size,
-            /*gather_output=*/false,
+            /*gather_output=*/FLAGS_sp_size > 1,
             /*need_scatter=*/false,
             /*process_group=*/parallel_args_.dit_tp_group_);
         add_v_options = TpOptions(
@@ -574,7 +670,7 @@ class WanAttentionImpl : public torch::nn::Module {
                                           heads_ * dim_head_,
                                           true,
                                           options_,
-                                          add_kv_type,
+                                          linear_type,
                                           std::nullopt,
                                           add_k_options);
       add_k_proj_ = register_module("add_k_proj", add_k_proj);
@@ -582,7 +678,7 @@ class WanAttentionImpl : public torch::nn::Module {
                                           heads_ * dim_head_,
                                           true,
                                           options_,
-                                          add_kv_type,
+                                          linear_type,
                                           std::nullopt,
                                           add_v_options);
       add_v_proj_ = register_module("add_v_proj", add_v_proj);
@@ -594,6 +690,13 @@ class WanAttentionImpl : public torch::nn::Module {
   torch::Tensor at_npu_attention(const torch::Tensor& q,
                                  const torch::Tensor& k,
                                  const torch::Tensor& v) {
+    // Upcast Q/K/V to FP32 before attention, reducing BF16 accumulation error
+    // in Q*K^T
+    /*
+    const auto q_t = q.to(torch::kFloat32).transpose(1, 2);
+    const auto k_t = k.to(torch::kFloat32).transpose(1, 2);
+    const auto v_t = v.to(torch::kFloat32).transpose(1, 2);
+    */
     const auto q_t = q.transpose(1, 2);
     const auto k_t = k.transpose(1, 2);
     const auto v_t = v.transpose(1, 2);
@@ -621,7 +724,11 @@ class WanAttentionImpl : public torch::nn::Module {
     attn_weights = torch::softmax(attn_weights, -1);
     torch::Tensor out = torch::matmul(attn_weights, v_t).transpose(1, 2);
 #endif
+    // FP32 attention out: convert back to BF16 to match original dtype
+    /*
     return out.flatten(2, 3).to(q.dtype());
+    */
+    return out.flatten(2, 3);
   }
 
   torch::Tensor forward(
@@ -651,6 +758,17 @@ class WanAttentionImpl : public torch::nn::Module {
     torch::Tensor query = to_q_->forward(hidden_states);
     torch::Tensor key = to_k_->forward(encoder_hidden_states_text);
     torch::Tensor value = to_v_->forward(encoder_hidden_states_text);
+    // FP32 pre-normalize Q/K before RMS norm, reducing BF16 per-element
+    // multiply error
+    /*
+    const double eps = 1e-6;
+    auto q_fp32 = query.to(torch::kFloat32);
+    auto k_fp32 = key.to(torch::kFloat32);
+    query = (q_fp32 * torch::rsqrt(torch::mean(q_fp32.square(), -1, true) +
+    eps)) .to(query.dtype()); key = (k_fp32 *
+    torch::rsqrt(torch::mean(k_fp32.square(), -1, true) + eps))
+              .to(key.dtype());
+    */
     query = std::get<0>(norm_q_->forward(query));
     key = std::get<0>(norm_k_->forward(key));
 
@@ -666,6 +784,33 @@ class WanAttentionImpl : public torch::nn::Module {
     if (FLAGS_tp_size > 1) {
       n_heads = heads_ / FLAGS_tp_size;
     }
+    if (FLAGS_sp_size > 1) {
+      query = sp_all_to_all(query,
+                            heads_,
+                            dim_head_,
+                            FLAGS_tp_size,
+                            parallel_args_.dit_sp_group_);
+      if (is_self_attention) {
+        key = sp_all_to_all(key,
+                            heads_,
+                            dim_head_,
+                            FLAGS_tp_size,
+                            parallel_args_.dit_sp_group_);
+      } else {
+        key = sp_slice_heads(key,
+                             heads_,
+                             dim_head_,
+                             FLAGS_tp_size,
+                             parallel_args_.dit_sp_group_);
+        value = sp_slice_heads(value,
+                               heads_,
+                               dim_head_,
+                               FLAGS_tp_size,
+                               parallel_args_.dit_sp_group_);
+      }
+      n_heads = n_heads / FLAGS_sp_size;
+    }
+
     query = query.view({batch_size, -1, n_heads, dim_head_});
     key = key.view({batch_size, -1, n_heads, dim_head_});
     value = value.view({batch_size, -1, n_heads, dim_head_});
@@ -688,17 +833,27 @@ class WanAttentionImpl : public torch::nn::Module {
         key_img = parallel_state::scatter(
             key_img, parallel_args_.dit_tp_group_, /*dim=*/-1);
       }
+      if (FLAGS_sp_size > 1) {
+        key_img = sp_slice_heads(key_img,
+                                 heads_,
+                                 dim_head_,
+                                 FLAGS_tp_size,
+                                 parallel_args_.dit_sp_group_);
+        value_img = sp_slice_heads(value_img,
+                                   heads_,
+                                   dim_head_,
+                                   FLAGS_tp_size,
+                                   parallel_args_.dit_sp_group_);
+      }
 
       key_img = key_img.view({batch_size, -1, n_heads, dim_head_});
       value_img = value_img.view({batch_size, -1, n_heads, dim_head_});
       hidden_states_img = at_npu_attention(query, key_img, value_img);
     }
     hidden_states = at_npu_attention(query, key, value);
-    ;
     if (hidden_states_img.defined()) {
       hidden_states = hidden_states + hidden_states_img;
     }
-
     hidden_states = to_out_->forward(hidden_states);
 
     return hidden_states;
@@ -1222,6 +1377,7 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
       : options_(context.get_tensor_options()) {
     auto model_args = context.get_model_args();
     auto parallel_args = context.get_parallel_args();
+    sp_group_ = parallel_args.dit_sp_group_;
     patch_size_ = model_args.wan_patch_size();
     num_attention_heads_ = model_args.n_heads();
     attention_head_dim_ = model_args.head_dim();
@@ -1252,7 +1408,6 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
                 {patch_size_[0], patch_size_[1], patch_size_[2]})
                 .stride({patch_size_[0], patch_size_[1], patch_size_[2]})
                 .padding(0)));
-
     patch_embedding_->to(options_.dtype().toScalarType());
     condition_embedder_ = register_module("condition_embedder",
                                           WanTimeTextImageEmbedding(context));
@@ -1306,6 +1461,10 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
         hidden_states.to(patch_embedding_->weight.dtype()));
     hidden_states = hidden_states.flatten(2).transpose(1, 2);
 
+    int64_t seq_len = hidden_states.size(1);
+    int64_t pad_seq_len = sp_pad_sequence(
+        hidden_states, freqs_cos, freqs_sin, rotary_emb, sp_group_);
+
     torch::Tensor timestep_input = timestep;
     int64_t ts_seq_len_val = hidden_states.size(1);
     std::optional<int64_t> ts_seq_len = ts_seq_len_val;
@@ -1337,12 +1496,23 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
                      1);
     }
 
+    if (FLAGS_sp_size > 1) {
+      hidden_states = sp_split_sequence(hidden_states, /*dim=*/1, sp_group_);
+      if (timestep_proj.dim() == 4) {
+        timestep_proj = sp_split_sequence(timestep_proj, /*dim=*/1, sp_group_);
+      }
+    }
+
     for (int64_t i = 0; i < transformer_layers_.size(); ++i) {
       hidden_states =
           transformer_layers_[i]->forward(hidden_states,
                                           encoder_hidden_states_embedded,
                                           timestep_proj,
                                           rotary_emb);
+    }
+
+    if (FLAGS_sp_size > 1) {
+      hidden_states = sp_gather_sequence(hidden_states, /*dim=*/1, sp_group_);
     }
 
     torch::Tensor shift, scale;
@@ -1369,6 +1539,9 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
     auto norm_out = norm_result * one_plus_scale + shift_fp32;
     hidden_states = norm_out.to(hidden_states.dtype());
 
+    if (FLAGS_sp_size > 1 && seq_len != pad_seq_len) {
+      hidden_states = hidden_states.slice(1, 0, seq_len);
+    }
     hidden_states = proj_out_->forward(hidden_states);
     hidden_states = hidden_states.view({batch_size,
                                         post_patch_num_frames,
@@ -1457,7 +1630,7 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
   int64_t inner_dim_;
   bool cross_attn_norm_;
   std::string qk_norm_;
-
+  ProcessGroup* sp_group_ = nullptr;
   torch::nn::Conv3d patch_embedding_{nullptr};
   WanTimeTextImageEmbedding condition_embedder_{nullptr};
   WanRotaryPosEmbed rope_{nullptr};
