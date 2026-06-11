@@ -323,10 +323,11 @@ class DiTParallelLinearImpl : public torch::nn::Module {
     params.b = tp_weight_;
     auto output = xllm::kernel::matmul(params);
 
-    auto orig_dtype = output.dtype();
-    auto output_fp32 = output.to(torch::kFloat32);
-    output =
-        parallel_state::reduce(output_fp32, tp.process_group).to(orig_dtype);
+    // auto orig_dtype = output.dtype();
+    // auto output_fp32 = output.to(torch::kFloat32);
+    // output =
+    //    parallel_state::reduce(output_fp32, tp.process_group).to(orig_dtype);
+    output = parallel_state::reduce(output, tp.process_group);
 
     if (has_bias_) {
       output = output + tp_bias_;
