@@ -22,7 +22,6 @@ limitations under the License.
 
 #include "core/framework/state_dict/utils.h"
 #include "core/layers/common/add_matmul.h"
-#include "core/layers/common/quant_linear_helpers.h"
 #include "core/layers/common/rms_norm.h"
 #include "framework/parallel_state/parallel_state.h"
 #include "kernels/ops_api.h"
