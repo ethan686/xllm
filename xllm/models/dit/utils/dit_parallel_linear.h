@@ -36,6 +36,9 @@ enum class LinearType {
   // Megatron-style tensor parallelism with column/row splitting +
   // gather/reduce.
   TensorParallel,
+  // Combined TP+SP: TP shards weights (column/row) while SP handles
+  // all2all communication for sequence/head distribution.
+  TensorAndSequenceParallel,
 };
 
 // ── Sequence Parallel Options ──────────────────────────────────────────────
@@ -175,6 +178,14 @@ class DiTParallelLinearImpl : public torch::nn::Module {
         tp_options_->validate();
         init_tp_weights();
         break;
+      case LinearType::TensorAndSequenceParallel:
+        CHECK(tp_options_.has_value())
+            << "DiTParallelLinear: TpOptions required for "
+            << "TensorAndSequenceParallel mode";
+        tp_options_->validate();
+        sp_options_.validate();
+        init_tp_weights();
+        break;
     }
   }
 
@@ -186,6 +197,8 @@ class DiTParallelLinearImpl : public torch::nn::Module {
         return forward_sp(input);
       case LinearType::TensorParallel:
         return forward_tp(input);
+      case LinearType::TensorAndSequenceParallel:
+        return forward_tp_sp(input);
       default:
         LOG(FATAL) << "DiTParallelLinear: unknown LinearType "
                    << static_cast<int>(linear_type_);
@@ -194,7 +207,8 @@ class DiTParallelLinearImpl : public torch::nn::Module {
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    if (linear_type_ == LinearType::TensorParallel) {
+    if (linear_type_ == LinearType::TensorParallel ||
+        linear_type_ == LinearType::TensorAndSequenceParallel) {
       load_tp_weights(state_dict);
     } else {
       linear_->load_state_dict(state_dict);
@@ -202,7 +216,8 @@ class DiTParallelLinearImpl : public torch::nn::Module {
   }
 
   void verify_loaded_weights(const std::string& prefix) const {
-    if (linear_type_ == LinearType::TensorParallel) {
+    if (linear_type_ == LinearType::TensorParallel ||
+        linear_type_ == LinearType::TensorAndSequenceParallel) {
       CHECK(tp_weight_loaded_)
           << "DiTParallelLinear: weight not loaded for " << prefix << "weight";
       if (has_bias_) {
@@ -215,8 +230,10 @@ class DiTParallelLinearImpl : public torch::nn::Module {
   }
 
   torch::Tensor get_weight() const {
-    return linear_type_ == LinearType::TensorParallel ? tp_weight_
-                                                      : torch::Tensor();
+    return (linear_type_ == LinearType::TensorParallel ||
+            linear_type_ == LinearType::TensorAndSequenceParallel)
+               ? tp_weight_
+               : torch::Tensor();
   }
 
  private:
@@ -321,15 +338,55 @@ class DiTParallelLinearImpl : public torch::nn::Module {
     params.b = tp_weight_;
     auto output = xllm::kernel::matmul(params);
 
-    auto orig_dtype = output.dtype();
-    auto output_fp32 = output.to(torch::kFloat32);
-    output =
-        parallel_state::reduce(output_fp32, tp.process_group).to(orig_dtype);
+    output = parallel_state::reduce(output, tp.process_group);
 
     if (has_bias_) {
       output = output + tp_bias_;
     }
     return output;
+  }
+
+  torch::Tensor forward_tp_sp(const torch::Tensor& input) {
+    CHECK(input.dim() == 3)
+        << "TP+SP linear expects 3D input {batch, seq, hidden}, got shape "
+        << input.sizes();
+
+    const auto& tp = tp_options_.value();
+    const auto group_size = sp_options_.process_group->world_size();
+
+    if (tp.column_parallel && sp_options_.before_attention) {
+      auto out = forward_tp_column(input);
+      auto fn = parallel_state::all_to_all_4D(
+          out.view({input.size(0),
+                    -1,
+                    sp_options_.head_num / tp.tp_size,
+                    sp_options_.head_dim}),
+          2,
+          1,
+          false,
+          sp_options_.process_group);
+      return fn().view({input.size(0),
+                        -1,
+                        sp_options_.hidden_size / (tp.tp_size * group_size)});
+    } else if (!tp.column_parallel && !sp_options_.before_attention) {
+      auto fn = parallel_state::all_to_all_4D(
+          input.view({input.size(0),
+                      -1,
+                      sp_options_.head_num / (tp.tp_size * group_size),
+                      sp_options_.head_dim}),
+          1,
+          2,
+          false,
+          sp_options_.process_group);
+      auto gathered =
+          fn().view({input.size(0), -1, sp_options_.hidden_size / tp.tp_size});
+      return forward_tp_row(gathered);
+    } else {
+      LOG(FATAL) << "TP+SP: unsupported combination, column_parallel="
+                 << tp.column_parallel
+                 << ", before_attention=" << sp_options_.before_attention;
+      return input;
+    }
   }
 
   void load_tp_weights(const StateDict& state_dict) {
