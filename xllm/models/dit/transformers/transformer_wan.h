@@ -426,7 +426,6 @@ class WanFeedForwardImpl : public torch::nn::Module {
     if (final_dropout_) {
       output = final_dropout_->forward(output);
     }
-
     return output;
   }
 
@@ -620,13 +619,6 @@ class WanAttentionImpl : public torch::nn::Module {
   torch::Tensor at_npu_attention(const torch::Tensor& q,
                                  const torch::Tensor& k,
                                  const torch::Tensor& v) {
-    // Upcast Q/K/V to FP32 before attention, reducing BF16 accumulation error
-    // in Q*K^T
-    /*
-    const auto q_t = q.to(torch::kFloat32).transpose(1, 2);
-    const auto k_t = k.to(torch::kFloat32).transpose(1, 2);
-    const auto v_t = v.to(torch::kFloat32).transpose(1, 2);
-    */
     const auto q_t = q.transpose(1, 2);
     const auto k_t = k.transpose(1, 2);
     const auto v_t = v.transpose(1, 2);
@@ -654,10 +646,6 @@ class WanAttentionImpl : public torch::nn::Module {
     attn_weights = torch::softmax(attn_weights, -1);
     torch::Tensor out = torch::matmul(attn_weights, v_t).transpose(1, 2);
 #endif
-    // FP32 attention out: convert back to BF16 to match original dtype
-    /*
-    return out.flatten(2, 3).to(q.dtype());
-    */
     return out.flatten(2, 3);
   }
 
