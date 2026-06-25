@@ -17,8 +17,10 @@ limitations under the License.
 
 #include <algorithm>
 #include <cstring>
+#include <fstream>
 #include <memory>
 
+#include "../../flowmatch_euler_discrete_scheduler.h"
 #include "autoencoder_kl_wan.h"
 #include "core/framework/dit_model_loader.h"
 #include "core/framework/model_context.h"
@@ -30,7 +32,6 @@ limitations under the License.
 #include "models/model_registry.h"
 #include "transformer_wan2_2.h"
 #include "umt5_encoder.h"
-#include "uni_pc_multi_step_scheduler.h"
 #include "video_processor.h"
 
 namespace xllm {
@@ -52,11 +53,12 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
 
     LOG(INFO) << "Initializing Wan2_2I2V pipeline...";
     vae_ = AutoencoderKLWan(context.get_model_context("vae"));
-    transformer_ = Wan22DiTModel(context.get_model_context("transformer"));
-    transformer_2_ = Wan22DiTModel(context.get_model_context("transformer_2"));
+    transformer_context_ = context.get_model_context("transformer");
+    transformer_ = Wan22DiTModel(transformer_context_);
     umt5_ = UMT5EncoderModel(context.get_model_context("text_encoder"));
+    umt5_->to(torch::kCPU);  // Offload to CPU to free ~11GB NPU for transformer
     scheduler_ =
-        UniPCMultistepScheduler(context.get_model_context("scheduler"));
+        FlowMatchEulerDiscreteScheduler(context.get_model_context("scheduler"));
     video_processor_ = VideoProcessor(context.get_model_context("vae"),
                                       true,
                                       true,
@@ -67,7 +69,6 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
                                       vae_scale_factor_spatial_);
     register_module("vae", vae_);
     register_module("transformer", transformer_);
-    register_module("transformer_2", transformer_2_);
     register_module("umt5", umt5_);
     register_module("scheduler", scheduler_);
     register_module("video_processor_", video_processor_);
@@ -148,20 +149,40 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
     auto umt5_loader = loader->take_component_loader("text_encoder");
     auto tokenizer_loader = loader->take_component_loader("tokenizer");
 
+    // Offload T5 to CPU first to free ~11GB NPU memory before transformer
+    // loading
+    umt5_->to(torch::kCPU);
     LOG(INFO) << "Wan2_2I2VPipeline model components loaded, start to load "
                  "weights to sub models";
     transformer_->load_model(std::move(transformer_loader));
     transformer_->to(options_.device());
-    transformer_2_->load_model(std::move(transformer_2_loader));
-    transformer_2_->to(options_.device());
+    transformer_2_loader_ = std::move(transformer_2_loader);
     vae_->load_model(std::move(vae_loader));
     vae_->to(options_.device());
+    // Keep T5 on CPU after loading — moved to NPU on-demand during encoding
     umt5_->load_model(std::move(umt5_loader));
-    umt5_->to(options_.device());
     tokenizer_ = tokenizer_loader->tokenizer();
   }
 
  private:
+  // Load a tensor saved by LightX2V's _dump in raw binary format:
+  // [ndim:int32 LE][shape:int64*ndim LE][data:float32 LE, row-major]
+  static torch::Tensor load_raw_tensor(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    CHECK(f.is_open()) << "Failed to open raw tensor file: " << path;
+    int32_t ndim = 0;
+    f.read(reinterpret_cast<char*>(&ndim), sizeof(int32_t));
+    std::vector<int64_t> shape(ndim);
+    int64_t numel = 1;
+    for (int i = 0; i < ndim; ++i) {
+      f.read(reinterpret_cast<char*>(&shape[i]), sizeof(int64_t));
+      numel *= shape[i];
+    }
+    std::vector<float> data(numel);
+    f.read(reinterpret_cast<char*>(data.data()), numel * sizeof(float));
+    return torch::from_blob(data.data(), shape, torch::kFloat32).clone();
+  }
+
   std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> prepare_latents(
       torch::Tensor image,
       int64_t batch_size,
@@ -187,8 +208,15 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
     if (latents.has_value()) {
       latents_tensor = latents.value().to(options_.device());
     } else {
-      latents_tensor =
-          xllm::dit::randn_tensor(shape, seed, options_, torch::kFloat32);
+      // Load LightX2V's initial noise to align starting point (cos → 0.92).
+      // LightX2V saves as [C,T,H,W] 4D raw binary; handle both 4D and 5D.
+      auto light = load_raw_tensor(
+          "/export/home/weinan5/zhangshaojie/wan2.2_distill_pt/"
+          "initial_latents.bin");
+      if (light.dim() == 4) {
+        light = light.unsqueeze(0);  // [C,T,H,W] → [1,C,T,H,W]
+      }
+      latents_tensor = light.to(options_.device()).to(torch::kFloat32);
     }
     image = image.unsqueeze(2);
     torch::Tensor video_condition;
@@ -220,7 +248,9 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
 
     torch::Tensor latent_condition;
     latent_condition = vae_->encode(video_condition).latent_dist.mode();
-    latent_condition = (latent_condition - latents_mean) * latents_std;
+    if (normalize_latent_condition_) {
+      latent_condition = (latent_condition - latents_mean) * latents_std;
+    }
 
     if (latent_condition.size(0) == 1 && batch_size > 1) {
       latent_condition = latent_condition.repeat({batch_size, 1, 1, 1, 1});
@@ -300,7 +330,9 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
     torch::Tensor attention_mask =
         (1.0 - (input_ids > 0).to(options_.dtype()).unsqueeze(1).unsqueeze(2)) *
         (std::numeric_limits<float>::lowest());
+    umt5_->to(options_.device());
     torch::Tensor prompt_embeds = umt5_->forward(input_ids, attention_mask);
+    umt5_->to(torch::kCPU);  // offload UMT5 to free ~11GB NPU memory
 
     prompt_embeds = prompt_embeds.to(options_);
 
@@ -440,9 +472,14 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
                       num_videos_per_prompt,
                       max_sequence_length);
 
+    // Compute uniform sigmas, scheduler shifts them internally
+    std::vector<float> raw_sigmas(num_inference_steps);
+    for (int i = 0; i < num_inference_steps; ++i) {
+      raw_sigmas[i] = 1.0f - static_cast<float>(i) / num_inference_steps;
+    }
     scheduler_->set_timesteps(num_inference_steps,
                               options_.device(),
-                              /*sigmas*/ std::nullopt,
+                              /*sigmas*/ raw_sigmas,
                               /*mu*/ std::nullopt);
     torch::Tensor timesteps = scheduler_->timesteps();
 
@@ -488,25 +525,52 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
                         seed,
                         latents);
 
+    // Encode single first frame for image_embedder cross-attention
+    torch::Tensor first_frame_latent;
+    if (!skip_image_embedder_) {
+      auto first_frame_input = preprocessed_image.unsqueeze(2);
+      first_frame_latent = vae_->encode(first_frame_input).latent_dist.mode();
+    }
+
     float boundary_timestep =
         boundary_ratio_ > 0.0f ? boundary_ratio_ * num_train_timesteps_ : -1.0f;
 
+    torch::save(encoded_prompt_embeds,
+                "/export/home/weinan5/zhangshaojie/cpp3/t5_context.pt");
+    torch::save(latent_condition,
+                "/export/home/weinan5/zhangshaojie/cpp3/vae_encoder_out.pt");
+
+    bool weights_reloaded = false;
     for (int64_t i = 0; i < timesteps.numel(); ++i) {
       torch::Tensor t = timesteps[i];
       int64_t total_steps = timesteps.numel();
 
-      Wan22DiTModel current_model = nullptr;
       float current_guidance;
 
-      if (boundary_timestep < 0 || t.item<float>() >= boundary_timestep) {
+      // Use shifted timestep for model switching, matching Lightning behavior
+      float current_t = t.item<float>();
+      if (boundary_timestep < 0 || current_t >= boundary_timestep) {
         LOG(INFO) << "high-noise t:" << t << "boundary_timestep"
                   << boundary_timestep;
-        current_model = transformer_;
         current_guidance = guidance_scale;
       } else {
+        if (!weights_reloaded && transformer_2_loader_) {
+          LOG(INFO) << "Boundary reached: offloading high-noise model, "
+                       "building low-noise model";
+          // Offload the old weights to CPU first so their NPU blocks return to
+          // the caching allocator before the new instance allocates — the new
+          // model reuses those blocks, keeping NPU peak at ~one model instead
+          // of doubling. A fresh instance also starts with all *_is_loaded_
+          // flags false, sidestepping the framework linear layers whose loaded
+          // flags cannot be reset for in-place reload.
+          transformer_->to(torch::kCPU);
+          transformer_ = Wan22DiTModel(transformer_context_);
+          transformer_->load_model(std::move(transformer_2_loader_));
+          transformer_->to(options_.device());
+          weights_reloaded = true;
+        }
         LOG(INFO) << "low-noise t:" << t << "boundary_timestep"
                   << boundary_timestep;
-        current_model = transformer_2_;
         current_guidance = guidance_scale_2;
       }
 
@@ -541,15 +605,15 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
         if (FLAGS_cfg_size == 2) {
           auto rank = parallel_args_.dit_cfg_group_->rank();
           if (rank == 0) {
-            noise_pred = current_model->forward(latent_model_input,
-                                                timestep_input,
-                                                encoded_prompt_embeds,
-                                                torch::Tensor());
+            noise_pred = transformer_->forward(latent_model_input,
+                                               timestep_input,
+                                               encoded_prompt_embeds,
+                                               first_frame_latent);
           } else {
-            noise_pred = current_model->forward(latent_model_input,
-                                                timestep_input,
-                                                encoded_negative_embeds,
-                                                torch::Tensor());
+            noise_pred = transformer_->forward(latent_model_input,
+                                               timestep_input,
+                                               encoded_negative_embeds,
+                                               first_frame_latent);
           }
           auto gathered = xllm::parallel_state::gather(
               noise_pred, parallel_args_.dit_cfg_group_, /*dim=*/0);
@@ -557,26 +621,42 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
           noise_pred = chunks[0];
           noise_uncond = chunks[1];
         } else {
-          noise_pred = current_model->forward(latent_model_input,
-                                              timestep_input,
-                                              encoded_prompt_embeds,
-                                              torch::Tensor());
-
-          noise_uncond = current_model->forward(latent_model_input,
-                                                timestep_input,
-                                                encoded_negative_embeds,
-                                                torch::Tensor());
+          noise_pred = transformer_->forward(latent_model_input,
+                                             timestep_input,
+                                             encoded_prompt_embeds,
+                                             first_frame_latent);
+          noise_uncond = transformer_->forward(latent_model_input,
+                                               timestep_input,
+                                               encoded_negative_embeds,
+                                               first_frame_latent);
         }
-
         noise_pred = noise_uncond.to(torch::kFloat32) +
                      static_cast<float>(current_guidance) *
                          (noise_pred.to(torch::kFloat32) -
                           noise_uncond.to(torch::kFloat32));
         noise_uncond.reset();
+      } else {
+        noise_pred = transformer_
+                         ->forward(latent_model_input,
+                                   timestep_input,
+                                   encoded_prompt_embeds,
+                                   first_frame_latent)
+                         .to(torch::kFloat32);
       }
 
+      LOG(INFO) << "Step " << i << ": t=" << t.item<float>()
+                << ", latent_norm=" << prepared_latents.norm().item<float>()
+                << ", noise_pred_norm=" << noise_pred.norm().item<float>();
+      torch::save(noise_pred,
+                  "/export/home/weinan5/zhangshaojie/cpp3/noise_pred_step" +
+                      std::to_string(i) + ".pt");
       auto prev_latents = scheduler_->step(noise_pred, t, prepared_latents);
+      LOG(INFO) << "  prev_latent_norm=" << prev_latents.norm().item<float>();
       prepared_latents = prev_latents.detach();
+      if (i == timesteps.numel() - 1) {
+        torch::save(prepared_latents,
+                    "/export/home/weinan5/zhangshaojie/cpp3/latents_final.pt");
+      }
       noise_pred.reset();
       prev_latents = torch::Tensor();
 
@@ -586,7 +666,18 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
       }
     }
 
-    prepared_latents = prepared_latents.to(torch::kFloat32);
+    // [Cross-decode test] Bypass DiT: use LightX2V's final latents
+    {
+      auto light = load_raw_tensor(
+          "/export/home/weinan5/zhangshaojie/wan2.2_distill_pt/"
+          "latents_final.bin");
+      if (light.dim() == 4) {
+        light = light.unsqueeze(0);  // [C,T,H,W] -> [1,C,T,H,W]
+      }
+      prepared_latents = light.to(options_.device()).to(torch::kFloat32);
+      LOG(INFO) << "[cross-decode] Using LightX2V latents shape="
+                << prepared_latents.sizes();
+    }
 
     if (expand_timesteps_) {
       prepared_latents = (1 - first_frame_mask) * latent_condition +
@@ -604,13 +695,15 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
             .view({1, num_channels_latents, 1, 1, 1})
             .to(prepared_latents.device());
 
-    torch::Tensor latents_std = 1.0 / latents_std_raw;
-    prepared_latents = prepared_latents / latents_std;
-    prepared_latents = prepared_latents + latents_mean;
+    if (normalize_latent_condition_) {
+      torch::Tensor latents_std = 1.0 / latents_std_raw;
+      prepared_latents = prepared_latents / latents_std;
+      prepared_latents = prepared_latents + latents_mean;
+    }
     video = vae_->decode(prepared_latents.to(torch::kFloat32)).sample;
-    torch::save(
-        video,
-        "/export/home/weinan5/zjs/tensors_save_dir/cpp/vae_output_cpp.pt");
+
+    torch::save(video,
+                "/export/home/weinan5/zhangshaojie/cpp3/vae_output_cpp.pt");
     video = video_processor_->postprocess_video(video);
 
     return video;
@@ -673,10 +766,11 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
   }
 
  private:
-  UniPCMultistepScheduler scheduler_{nullptr};
+  FlowMatchEulerDiscreteScheduler scheduler_{nullptr};
   AutoencoderKLWan vae_{nullptr};
   Wan22DiTModel transformer_{nullptr};
-  Wan22DiTModel transformer_2_{nullptr};
+  ModelContext transformer_context_;
+  std::unique_ptr<DiTFolderLoader> transformer_2_loader_;
   UMT5EncoderModel umt5_{nullptr};
   std::unique_ptr<Tokenizer> tokenizer_{nullptr};
   VideoProcessor video_processor_{nullptr};
@@ -686,7 +780,10 @@ class Wan2_2I2VPipelineImpl : public torch::nn::Module {
   int64_t vae_scale_factor_spatial_ = 8;
   int64_t vae_scale_factor_temporal_ = 4;
   float boundary_ratio_ = 0.9f;
+  bool skip_image_embedder_ =
+      true;  // Distilled model: img_emb not used in training
   bool expand_timesteps_ = false;
+  bool normalize_latent_condition_ = true;
   int64_t zdim_ = 16;
   float num_train_timesteps_ = 1000.0f;
   std::vector<double> latents_mean_;

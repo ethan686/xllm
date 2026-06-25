@@ -690,16 +690,10 @@ class WanAttentionImpl : public torch::nn::Module {
   torch::Tensor at_npu_attention(const torch::Tensor& q,
                                  const torch::Tensor& k,
                                  const torch::Tensor& v) {
-    // Upcast Q/K/V to FP32 before attention, reducing BF16 accumulation error
-    // in Q*K^T
-    /*
-    const auto q_t = q.to(torch::kFloat32).transpose(1, 2);
-    const auto k_t = k.to(torch::kFloat32).transpose(1, 2);
-    const auto v_t = v.to(torch::kFloat32).transpose(1, 2);
-    */
-    const auto q_t = q.transpose(1, 2);
-    const auto k_t = k.transpose(1, 2);
-    const auto v_t = v.transpose(1, 2);
+    const auto input_dtype = q.dtype();
+    const auto q_t = q.to(torch::kBFloat16).transpose(1, 2);
+    const auto k_t = k.to(torch::kBFloat16).transpose(1, 2);
+    const auto v_t = v.to(torch::kBFloat16).transpose(1, 2);
 
 #if defined(USE_NPU)
     const int64_t head_num = q_t.size(1);
@@ -724,11 +718,7 @@ class WanAttentionImpl : public torch::nn::Module {
     attn_weights = torch::softmax(attn_weights, -1);
     torch::Tensor out = torch::matmul(attn_weights, v_t).transpose(1, 2);
 #endif
-    // FP32 attention out: convert back to BF16 to match original dtype
-    /*
-    return out.flatten(2, 3).to(q.dtype());
-    */
-    return out.flatten(2, 3);
+    return out.flatten(2, 3).to(input_dtype);
   }
 
   torch::Tensor forward(
@@ -758,17 +748,13 @@ class WanAttentionImpl : public torch::nn::Module {
     torch::Tensor query = to_q_->forward(hidden_states);
     torch::Tensor key = to_k_->forward(encoder_hidden_states_text);
     torch::Tensor value = to_v_->forward(encoder_hidden_states_text);
-    // FP32 pre-normalize Q/K before RMS norm, reducing BF16 per-element
-    // multiply error
-    /*
-    const double eps = 1e-6;
-    auto q_fp32 = query.to(torch::kFloat32);
-    auto k_fp32 = key.to(torch::kFloat32);
-    query = (q_fp32 * torch::rsqrt(torch::mean(q_fp32.square(), -1, true) +
-    eps)) .to(query.dtype()); key = (k_fp32 *
-    torch::rsqrt(torch::mean(k_fp32.square(), -1, true) + eps))
-              .to(key.dtype());
-    */
+
+    // tp gather may promote to fp32, but norm_q/norm_k weights are bf16
+    // and npu_rms_norm rejects x=fp32 + gamma=bf16
+    query = query.to(torch::kBFloat16);
+    key = key.to(torch::kBFloat16);
+    value = value.to(torch::kBFloat16);
+
     query = std::get<0>(norm_q_->forward(query));
     key = std::get<0>(norm_k_->forward(key));
 
@@ -1042,9 +1028,10 @@ class WanTimeTextImageEmbeddingImpl : public torch::nn::Module {
       timestep_proj =
           timesteps_proj_->forward(ts).view({-1, seq_len, time_freq_dim_});
     }
-    timestep_proj = timestep_proj.to(torch::kFloat32);
-    auto embed_dtype = encoder_hidden_states.dtype();
-    torch::Tensor temb = time_embedder_->forward(timestep_proj.to(embed_dtype));
+    // bf16 inference path — keep timestep_proj in native dtype
+    // (Previously: Lightning-style FP32 time embedding path was here,
+    //  commented out for bf16 inference matching LightX2V.)
+    torch::Tensor temb = time_embedder_->forward(timestep_proj);
     torch::Tensor timestep_proj_out =
         time_proj_->forward(act_fn_->forward(temb));
     if (seq_len > 1) {
@@ -1061,6 +1048,11 @@ class WanTimeTextImageEmbeddingImpl : public torch::nn::Module {
     }
 
     return {temb, timestep_proj_out, text_emb, image_emb};
+  }
+
+  void restore_fp32_time_path() {
+    time_embedder_->to(torch::kFloat32);
+    time_proj_->to(torch::kFloat32);
   }
 
   void load_state_dict(const StateDict& state_dict) {
@@ -1277,9 +1269,12 @@ class WanTransformerBlockImpl : public torch::nn::Module {
         c_gate_msa;
 
     if (timestep_proj.dim() == 4) {
+      // Compute modulation in FP32 (matching Lightning's
+      // autocast(dtype=float32)) auto scale_shift =
+      //     (scale_shift_table_.unsqueeze(0) + timestep_proj);
       auto scale_shift =
-          scale_shift_table_.unsqueeze(0).to(hidden_states.dtype()) +
-          timestep_proj.to(hidden_states.dtype());
+          (scale_shift_table_.unsqueeze(0).to(hidden_states.dtype()) +
+           timestep_proj);
       auto splits = scale_shift.chunk(6, 2);
       shift_msa = splits[0].squeeze(2);
       scale_msa = splits[1].squeeze(2);
@@ -1288,8 +1283,10 @@ class WanTransformerBlockImpl : public torch::nn::Module {
       c_scale_msa = splits[4].squeeze(2);
       c_gate_msa = splits[5].squeeze(2);
     } else {
-      auto scale_shift = scale_shift_table_.to(hidden_states.dtype()) +
-                         timestep_proj.to(hidden_states.dtype());
+      // auto scale_shift =
+      //     (scale_shift_table_ + timestep_proj);
+      auto scale_shift =
+          (scale_shift_table_.to(hidden_states.dtype()) + timestep_proj);
       auto splits = scale_shift.chunk(6, 1);
       shift_msa = splits[0];
       scale_msa = splits[1];
@@ -1300,10 +1297,13 @@ class WanTransformerBlockImpl : public torch::nn::Module {
     }
 
     torch::Tensor norm1_result = norm1_->forward(hidden_states);
+
     torch::Tensor norm_hidden_states =
-        (norm1_result.to(hidden_states.dtype()) * (1 + scale_msa) + shift_msa);
+        norm1_result * (1 + scale_msa) + shift_msa;
+
     torch::Tensor attn_output =
         attn1_->forward(norm_hidden_states, norm_hidden_states, rotary_emb);
+
     hidden_states = hidden_states + attn_output * gate_msa;
 
     if (cross_attn_norm_) {
@@ -1314,14 +1314,26 @@ class WanTransformerBlockImpl : public torch::nn::Module {
 
     attn_output = attn2_->forward(
         norm_hidden_states, encoder_hidden_states, std::nullopt);
+
     hidden_states = hidden_states + attn_output;
+
     torch::Tensor norm2_result = norm3_->forward(hidden_states);
-    norm_hidden_states = (norm2_result * (1 + c_scale_msa) + c_shift_msa);
+    norm_hidden_states = norm2_result * (1 + c_scale_msa) + c_shift_msa;
+
     torch::Tensor ff_output = ff_->forward(norm_hidden_states);
+
     hidden_states = hidden_states + ff_output * c_gate_msa;
 
     return hidden_states;
   }
+
+  void restore_fp32_scale_shift() {
+    scale_shift_table_ = scale_shift_table_.to(torch::kFloat32);
+  }
+
+  torch::Tensor get_scale_shift_table() const { return scale_shift_table_; }
+
+  void set_scale_shift_table(const torch::Tensor& t) { scale_shift_table_ = t; }
 
   void load_state_dict(const StateDict& state_dict) {
     attn1_->load_state_dict(state_dict.get_dict_with_prefix("attn1."));
@@ -1453,6 +1465,13 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
 
     torch::Tensor hidden_states = hidden_states_in;
 
+    static bool pe_in_dumped = false;
+    if (!pe_in_dumped) {
+      torch::save(hidden_states,
+                  "/export/home/weinan5/zhangshaojie/cpp3/patch_embed_in.pt");
+      pe_in_dumped = true;
+    }
+
     auto [freqs_cos, freqs_sin] = rope_->forward(hidden_states);
 
     auto rotary_emb = std::make_pair(freqs_cos, freqs_sin);
@@ -1460,6 +1479,13 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
     hidden_states = patch_embedding_->forward(
         hidden_states.to(patch_embedding_->weight.dtype()));
     hidden_states = hidden_states.flatten(2).transpose(1, 2);
+
+    static bool pe_dumped = false;
+    if (!pe_dumped) {
+      torch::save(hidden_states,
+                  "/export/home/weinan5/zhangshaojie/cpp3/patch_embed_out.pt");
+      pe_dumped = true;
+    }
 
     int64_t seq_len = hidden_states.size(1);
     int64_t pad_seq_len = sp_pad_sequence(
@@ -1509,10 +1535,31 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
                                           encoder_hidden_states_embedded,
                                           timestep_proj,
                                           rotary_emb);
+      if (i == 9 || i == 19 || i == 29) {
+        static bool d10 = false, d20 = false, d30 = false;
+        bool* flag = (i == 9) ? &d10 : ((i == 19) ? &d20 : &d30);
+        if (!*flag) {
+          torch::Tensor mid = hidden_states;
+          if (FLAGS_sp_size > 1) {
+            mid = sp_gather_sequence(mid, /*dim=*/1, sp_group_);
+          }
+          torch::save(mid.slice(1, 0, seq_len),
+                      "/export/home/weinan5/zhangshaojie/cpp3/block_out_" +
+                          std::to_string(i + 1) + ".pt");
+          *flag = true;
+        }
+      }
     }
 
     if (FLAGS_sp_size > 1) {
       hidden_states = sp_gather_sequence(hidden_states, /*dim=*/1, sp_group_);
+    }
+
+    static bool block_out_dumped = false;
+    if (!block_out_dumped) {
+      torch::save(hidden_states.slice(1, 0, seq_len),
+                  "/export/home/weinan5/zhangshaojie/cpp3/block_out.pt");
+      block_out_dumped = true;
     }
 
     torch::Tensor shift, scale;
@@ -1532,17 +1579,14 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
     shift = shift.to(hidden_states.device());
     scale = scale.to(hidden_states.device());
 
-    auto norm_result = norm_out_->forward(hidden_states, /*keep_fp32*/ true);
-    auto one_plus_scale =
-        (1 + scale.to(hidden_states.dtype())).to(torch::kFloat32);
-    auto shift_fp32 = shift.to(torch::kFloat32);
-    auto norm_out = norm_result * one_plus_scale + shift_fp32;
-    hidden_states = norm_out.to(hidden_states.dtype());
+    auto norm_result = norm_out_->forward(hidden_states, /*keep_fp32*/ false);
+    auto one_plus_scale = (1 + scale);
+    auto norm_out = norm_result * one_plus_scale + shift;
 
     if (FLAGS_sp_size > 1 && seq_len != pad_seq_len) {
-      hidden_states = hidden_states.slice(1, 0, seq_len);
+      norm_out = norm_out.slice(1, 0, seq_len);
     }
-    hidden_states = proj_out_->forward(hidden_states);
+    hidden_states = proj_out_->forward(norm_out);
     hidden_states = hidden_states.view({batch_size,
                                         post_patch_num_frames,
                                         post_patch_height,
@@ -1553,6 +1597,7 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
                                         -1});
     hidden_states = hidden_states.permute({0, 7, 1, 4, 2, 5, 3, 6});
     hidden_states = hidden_states.flatten(6, 7).flatten(4, 5).flatten(2, 3);
+
     return hidden_states;
   }
 
@@ -1607,10 +1652,23 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
 
     auto freqs_cos_fp32 = rope_->get_freqs_cos().clone();
     auto freqs_sin_fp32 = rope_->get_freqs_sin().clone();
+    auto scale_shift_table_fp32 = scale_shift_table_.clone();
+    std::vector<torch::Tensor> block_sst_fp32;
+    for (auto& block : transformer_layers_) {
+      block_sst_fp32.push_back(block->get_scale_shift_table().clone());
+    }
 
-    this->to(torch::kBFloat16);
+    // Distilled model weights are already BF16, skip to(BF16) to avoid
+    // temporary full-model copy that doubles NPU peak memory at init.
+    // this->to(torch::kBFloat16);
+
     rope_->set_freqs_cos(freqs_cos_fp32);
     rope_->set_freqs_sin(freqs_sin_fp32);
+    scale_shift_table_ = scale_shift_table_fp32;
+    condition_embedder_->restore_fp32_time_path();
+    for (int64_t i = 0; i < transformer_layers_.size(); ++i) {
+      transformer_layers_[i]->set_scale_shift_table(block_sst_fp32[i]);
+    }
   }
 
  private:
