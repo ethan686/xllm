@@ -903,9 +903,8 @@ class WanTimeTextImageEmbeddingImpl : public torch::nn::Module {
       timestep_proj =
           timesteps_proj_->forward(ts).view({-1, seq_len, time_freq_dim_});
     }
-    timestep_proj = timestep_proj.to(torch::kFloat32);
-    auto embed_dtype = encoder_hidden_states.dtype();
-    torch::Tensor temb = time_embedder_->forward(timestep_proj.to(embed_dtype));
+    timestep_proj = timestep_proj;
+    torch::Tensor temb = time_embedder_->forward(timestep_proj);
     torch::Tensor timestep_proj_out =
         time_proj_->forward(act_fn_->forward(temb));
     if (seq_len > 1) {
@@ -1139,8 +1138,8 @@ class WanTransformerBlockImpl : public torch::nn::Module {
 
     if (timestep_proj.dim() == 4) {
       auto scale_shift =
-          scale_shift_table_.unsqueeze(0).to(hidden_states.dtype()) +
-          timestep_proj.to(hidden_states.dtype());
+          (scale_shift_table_.unsqueeze(0).to(hidden_states.dtype()) +
+           timestep_proj);
       auto splits = scale_shift.chunk(6, 2);
       shift_msa = splits[0].squeeze(2);
       scale_msa = splits[1].squeeze(2);
@@ -1149,8 +1148,8 @@ class WanTransformerBlockImpl : public torch::nn::Module {
       c_scale_msa = splits[4].squeeze(2);
       c_gate_msa = splits[5].squeeze(2);
     } else {
-      auto scale_shift = scale_shift_table_.to(hidden_states.dtype()) +
-                         timestep_proj.to(hidden_states.dtype());
+      auto scale_shift =
+          (scale_shift_table_.to(hidden_states.dtype()) + timestep_proj);
       auto splits = scale_shift.chunk(6, 1);
       shift_msa = splits[0];
       scale_msa = splits[1];
@@ -1162,7 +1161,7 @@ class WanTransformerBlockImpl : public torch::nn::Module {
 
     torch::Tensor norm1_result = norm1_->forward(hidden_states);
     torch::Tensor norm_hidden_states =
-        (norm1_result.to(hidden_states.dtype()) * (1 + scale_msa) + shift_msa);
+        norm1_result * (1 + scale_msa) + shift_msa;
     torch::Tensor attn_output =
         attn1_->forward(norm_hidden_states, norm_hidden_states, rotary_emb);
     hidden_states = hidden_states + attn_output * gate_msa;
@@ -1177,12 +1176,16 @@ class WanTransformerBlockImpl : public torch::nn::Module {
         norm_hidden_states, encoder_hidden_states, std::nullopt);
     hidden_states = hidden_states + attn_output;
     torch::Tensor norm2_result = norm3_->forward(hidden_states);
-    norm_hidden_states = (norm2_result * (1 + c_scale_msa) + c_shift_msa);
+    norm_hidden_states = norm2_result * (1 + c_scale_msa) + c_shift_msa;
     torch::Tensor ff_output = ff_->forward(norm_hidden_states);
     hidden_states = hidden_states + ff_output * c_gate_msa;
 
     return hidden_states;
   }
+
+  torch::Tensor get_scale_shift_table() const { return scale_shift_table_; }
+
+  void set_scale_shift_table(const torch::Tensor& t) { scale_shift_table_ = t; }
 
   void load_state_dict(const StateDict& state_dict) {
     attn1_->load_state_dict(state_dict.get_dict_with_prefix("attn1."));
@@ -1378,14 +1381,11 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
     shift = shift.to(hidden_states.device());
     scale = scale.to(hidden_states.device());
 
-    auto norm_result = norm_out_->forward(hidden_states, /*keep_fp32*/ true);
-    auto one_plus_scale =
-        (1 + scale.to(hidden_states.dtype())).to(torch::kFloat32);
-    auto shift_fp32 = shift.to(torch::kFloat32);
-    auto norm_out = norm_result * one_plus_scale + shift_fp32;
-    hidden_states = norm_out.to(hidden_states.dtype());
+    auto norm_result = norm_out_->forward(hidden_states, /*keep_fp32*/ false);
+    auto one_plus_scale = (1 + scale);
+    auto norm_out = norm_result * one_plus_scale + shift;
 
-    hidden_states = proj_out_->forward(hidden_states);
+    hidden_states = proj_out_->forward(norm_out);
     hidden_states = hidden_states.view({batch_size,
                                         post_patch_num_frames,
                                         post_patch_height,
@@ -1450,10 +1450,19 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
 
     auto freqs_cos_fp32 = rope_->get_freqs_cos().clone();
     auto freqs_sin_fp32 = rope_->get_freqs_sin().clone();
+    auto scale_shift_table_fp32 = scale_shift_table_.clone();
+    std::vector<torch::Tensor> block_sst_fp32;
+    for (auto& block : transformer_layers_) {
+      block_sst_fp32.push_back(block->get_scale_shift_table().clone());
+    }
 
     this->to(torch::kBFloat16);
     rope_->set_freqs_cos(freqs_cos_fp32);
     rope_->set_freqs_sin(freqs_sin_fp32);
+    scale_shift_table_ = scale_shift_table_fp32;
+    for (int64_t i = 0; i < transformer_layers_.size(); ++i) {
+      transformer_layers_[i]->set_scale_shift_table(block_sst_fp32[i]);
+    }
   }
 
  private:

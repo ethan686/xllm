@@ -29,7 +29,7 @@ limitations under the License.
 #include "models/dit/autoencoders/autoencoder_kl_wan.h"
 #include "models/dit/encoders/umt5_encoder.h"
 #include "models/dit/processors/vae_video_processor.h"
-#include "models/dit/schedulers/uni_pc_multi_step_scheduler.h"
+#include "models/dit/schedulers/flowmatch_euler_discrete_scheduler.h"
 #include "models/dit/transformers/transformer_wan.h"
 #include "models/model_registry.h"
 
@@ -50,13 +50,13 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module {
 
     LOG(INFO) << "Initializing Wan2_2I2V pipeline...";
     vae_ = AutoencoderKLWan(context.get_model_context("vae"));
-    transformer_ =
-        WanTransformer3DModel(context.get_model_context("transformer"));
-    transformer_2_ =
-        WanTransformer3DModel(context.get_model_context("transformer_2"));
+    transformer_context_ = context.get_model_context("transformer");
+    transformer_ = WanTransformer3DModel(transformer_context_);
     umt5_ = UMT5EncoderModel(context.get_model_context("text_encoder"));
+    umt5_->to(
+        torch::kCPU);  // Offload to CPU to free NPU memory for transformer
     scheduler_ =
-        UniPCMultistepScheduler(context.get_model_context("scheduler"));
+        FlowMatchEulerDiscreteScheduler(context.get_model_context("scheduler"));
     video_processor_ = VAEVideoProcessor(context.get_model_context("vae"),
                                          true,
                                          true,
@@ -67,7 +67,6 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module {
                                          vae_scale_factor_spatial_);
     register_module("vae", vae_);
     register_module("transformer", transformer_);
-    register_module("transformer_2", transformer_2_);
     register_module("umt5", umt5_);
     register_module("scheduler", scheduler_);
     register_module("video_processor_", video_processor_);
@@ -129,16 +128,17 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module {
     auto umt5_loader = loader->take_component_loader("text_encoder");
     auto tokenizer_loader = loader->take_component_loader("tokenizer");
 
+    // Offload UMT5 to CPU first to free NPU memory before transformer loading
+    umt5_->to(torch::kCPU);
     LOG(INFO) << "Wan2_2I2VPipeline model components loaded, start to load "
                  "weights to sub models";
     transformer_->load_model(std::move(transformer_loader));
     transformer_->to(options_.device());
-    transformer_2_->load_model(std::move(transformer_2_loader));
-    transformer_2_->to(options_.device());
+    transformer_2_loader_ = std::move(transformer_2_loader);
     vae_->load_model(std::move(vae_loader));
     vae_->to(options_.device());
+    // Keep UMT5 on CPU after loading — moved to NPU on-demand during encoding
     umt5_->load_model(std::move(umt5_loader));
-    umt5_->to(options_.device());
     tokenizer_ = tokenizer_loader->tokenizer();
   }
 
@@ -281,7 +281,9 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module {
     torch::Tensor attention_mask =
         (1.0 - (input_ids > 0).to(options_.dtype()).unsqueeze(1).unsqueeze(2)) *
         (std::numeric_limits<float>::lowest());
+    umt5_->to(options_.device());
     torch::Tensor prompt_embeds = umt5_->forward(input_ids, attention_mask);
+    umt5_->to(torch::kCPU);  // offload UMT5 to free NPU memory
 
     prompt_embeds = prompt_embeds.to(options_);
 
@@ -466,22 +468,29 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module {
     float boundary_timestep =
         boundary_ratio_ > 0.0f ? boundary_ratio_ * num_train_timesteps_ : -1.0f;
 
+    bool weights_reloaded = false;
     for (int64_t i = 0; i < timesteps.numel(); ++i) {
       torch::Tensor t = timesteps[i];
       int64_t total_steps = timesteps.numel();
 
-      WanTransformer3DModel current_model = nullptr;
       float current_guidance;
 
       if (boundary_timestep < 0 || t.item<float>() >= boundary_timestep) {
         LOG(INFO) << "high-noise t:" << t << "boundary_timestep"
                   << boundary_timestep;
-        current_model = transformer_;
         current_guidance = guidance_scale;
       } else {
+        if (!weights_reloaded && transformer_2_loader_) {
+          LOG(INFO) << "Boundary reached: offloading high-noise model, "
+                       "building low-noise model";
+          transformer_->to(torch::kCPU);
+          transformer_ = WanTransformer3DModel(transformer_context_);
+          transformer_->load_model(std::move(transformer_2_loader_));
+          transformer_->to(options_.device());
+          weights_reloaded = true;
+        }
         LOG(INFO) << "low-noise t:" << t << "boundary_timestep"
                   << boundary_timestep;
-        current_model = transformer_2_;
         current_guidance = guidance_scale_2;
       }
 
@@ -515,15 +524,15 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module {
         if (ParallelConfig::get_instance().cfg_size() == 2) {
           int32_t rank = parallel_args_.dit_cfg_group_->rank();
           if (rank == 0) {
-            noise_pred = current_model->forward(latent_model_input,
-                                                timestep_input,
-                                                encoded_prompt_embeds,
-                                                torch::Tensor());
+            noise_pred = transformer_->forward(latent_model_input,
+                                               timestep_input,
+                                               encoded_prompt_embeds,
+                                               torch::Tensor());
           } else {
-            noise_pred = current_model->forward(latent_model_input,
-                                                timestep_input,
-                                                encoded_negative_embeds,
-                                                torch::Tensor());
+            noise_pred = transformer_->forward(latent_model_input,
+                                               timestep_input,
+                                               encoded_negative_embeds,
+                                               torch::Tensor());
           }
           auto gathered = xllm::parallel_state::gather(
               noise_pred, parallel_args_.dit_cfg_group_, /*dim=*/0);
@@ -531,15 +540,15 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module {
           noise_pred = chunks[0];
           noise_uncond = chunks[1];
         } else {
-          noise_pred = current_model->forward(latent_model_input,
-                                              timestep_input,
-                                              encoded_prompt_embeds,
-                                              torch::Tensor());
+          noise_pred = transformer_->forward(latent_model_input,
+                                             timestep_input,
+                                             encoded_prompt_embeds,
+                                             torch::Tensor());
 
-          noise_uncond = current_model->forward(latent_model_input,
-                                                timestep_input,
-                                                encoded_negative_embeds,
-                                                torch::Tensor());
+          noise_uncond = transformer_->forward(latent_model_input,
+                                               timestep_input,
+                                               encoded_negative_embeds,
+                                               torch::Tensor());
         }
 
         noise_pred = noise_uncond.to(torch::kFloat32) +
@@ -643,10 +652,11 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module {
   }
 
  private:
-  UniPCMultistepScheduler scheduler_{nullptr};
+  FlowMatchEulerDiscreteScheduler scheduler_{nullptr};
   AutoencoderKLWan vae_{nullptr};
   WanTransformer3DModel transformer_{nullptr};
-  WanTransformer3DModel transformer_2_{nullptr};
+  ModelContext transformer_context_;
+  std::unique_ptr<DiTModelLoader> transformer_2_loader_;
   UMT5EncoderModel umt5_{nullptr};
   std::unique_ptr<Tokenizer> tokenizer_{nullptr};
   VAEVideoProcessor video_processor_{nullptr};
