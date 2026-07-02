@@ -646,7 +646,6 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module {
     prepared_latents = prepared_latents / latents_std;
     prepared_latents = prepared_latents + latents_mean;
     video = vae_->decode(prepared_latents.to(torch::kFloat32)).sample;
-    torch::save(video, "./vae_decode_output.pt");
     video = video_processor_->postprocess_video(video);
     return video;
   }
