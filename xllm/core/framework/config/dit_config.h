@@ -41,21 +41,17 @@ class DiTConfig final {
   [[nodiscard]] static const OptionCategory& option_category() {
     static const OptionCategory kOptionCategory = {
         "DiT MODEL OPTIONS",
-        {"max_requests_per_batch",
-         "dit_cache_policy",
-         "dit_cache_warmup_steps",
-         "dit_cache_n_derivatives",
-         "dit_cache_skip_interval_steps",
-         "dit_cache_residual_diff_threshold",
-         "dit_cache_start_steps",
-         "dit_cache_end_steps",
-         "dit_cache_start_blocks",
-         "dit_cache_end_blocks",
-         "dit_sp_communication_overlap",
-         "dit_debug_print",
-         "dit_generation_image_area_max",
-         "dit_vae_image_size",
-         "dit_enable_vae_tiling"}};
+        {"max_requests_per_batch",        "dit_cache_policy",
+         "dit_cache_warmup_steps",        "dit_cache_n_derivatives",
+         "dit_cache_skip_interval_steps", "dit_cache_residual_diff_threshold",
+         "dit_cache_start_steps",         "dit_cache_end_steps",
+         "dit_cache_start_blocks",        "dit_cache_end_blocks",
+         "dit_sp_communication_overlap",  "dit_debug_print",
+         "dit_generation_image_area_max", "dit_vae_image_size",
+         "dit_enable_vae_tiling",         "rainfusion_enabled",
+         "rainfusion_sparsity",           "rainfusion_pool_size",
+         "rainfusion_sparse_start_step",  "rainfusion_version",
+         "rainfusion_mask_refresh_steps"}};
     return kOptionCategory;
   }
 
@@ -88,6 +84,18 @@ class DiTConfig final {
   PROPERTY(int64_t, dit_vae_image_size) = 1048576;
 
   PROPERTY(bool, dit_enable_vae_tiling) = false;
+
+  PROPERTY(bool, rainfusion_enabled) = false;
+
+  PROPERTY(double, rainfusion_sparsity) = 0.5;
+
+  PROPERTY(int64_t, rainfusion_pool_size) = 128;
+
+  PROPERTY(int64_t, rainfusion_sparse_start_step) = 0;
+
+  PROPERTY(std::string, rainfusion_version) = "v2";
+
+  PROPERTY(int64_t, rainfusion_mask_refresh_steps) = 1;
 };
 
 }  // namespace xllm

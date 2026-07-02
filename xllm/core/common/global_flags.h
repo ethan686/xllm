@@ -362,6 +362,18 @@ DECLARE_bool(dit_debug_print);
 
 DECLARE_bool(dit_enable_vae_tiling);
 
+DECLARE_bool(rainfusion_enabled);
+
+DECLARE_double(rainfusion_sparsity);
+
+DECLARE_int64(rainfusion_pool_size);
+
+DECLARE_int64(rainfusion_sparse_start_step);
+
+DECLARE_string(rainfusion_version);
+
+DECLARE_int64(rainfusion_mask_refresh_steps);
+
 DECLARE_bool(use_audio_in_video);
 
 // --- kernel config ---
