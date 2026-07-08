@@ -362,6 +362,8 @@ DECLARE_bool(dit_debug_print);
 
 DECLARE_bool(dit_enable_vae_tiling);
 
+DECLARE_bool(dit_distill_enable);
+
 DECLARE_bool(use_audio_in_video);
 
 // --- kernel config ---

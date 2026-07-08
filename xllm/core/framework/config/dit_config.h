@@ -53,6 +53,7 @@ class DiTConfig final {
          "dit_cache_end_blocks",
          "dit_sp_communication_overlap",
          "dit_debug_print",
+         "dit_distill_enable",
          "dit_generation_image_area_max",
          "dit_vae_image_size",
          "dit_enable_vae_tiling"}};
@@ -82,6 +83,8 @@ class DiTConfig final {
   PROPERTY(bool, dit_sp_communication_overlap) = true;
 
   PROPERTY(bool, dit_debug_print) = false;
+
+  PROPERTY(bool, dit_distill_enable) = false;
 
   PROPERTY(int64_t, dit_generation_image_area_max) = 0;
 

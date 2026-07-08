@@ -26,6 +26,7 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "core/framework/config/dit_config.h"
 #include "core/framework/config/load_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/dit_model_loader.h"
@@ -688,8 +689,20 @@ class WanAttentionImpl : public torch::nn::Module {
       query = dit::tp_rms_norm(query, norm_q_, parallel_args_.dit_tp_group_);
       key = dit::tp_rms_norm(key, norm_k_, parallel_args_.dit_tp_group_);
     } else {
-      query = std::get<0>(norm_q_->forward(query));
-      key = std::get<0>(norm_k_->forward(key));
+      // Distill uses per-op torch RMSNorm (matches lightx2v); else fused kernel.
+      if (DiTConfig::get_instance().dit_distill_enable() && is_self_attention) {
+        auto torch_rms = [](const torch::Tensor& x,
+                            const torch::Tensor& w, double eps) {
+          // x * rsqrt(mean(x^2, -1) + eps) * w; w.to(x) for rolling-load weights.
+          auto var = x.pow(2).mean(-1, /*keepdim=*/true);
+          return (x * torch::rsqrt(var + eps)) * w.to(x.device(), x.dtype());
+        };
+        query = torch_rms(query, norm_q_->weight(), norm_q_->eps());
+        key   = torch_rms(key,   norm_k_->weight(), norm_k_->eps());
+      } else {
+        query = std::get<0>(norm_q_->forward(query));
+        key = std::get<0>(norm_k_->forward(key));
+      }
     }
 
     // ── Step 3: SP all2all for Q/K (V already done in layer) ──
@@ -959,9 +972,8 @@ class WanTimeTextImageEmbeddingImpl : public torch::nn::Module {
       timestep_proj =
           timesteps_proj_->forward(ts).view({-1, seq_len, time_freq_dim_});
     }
-    timestep_proj = timestep_proj.to(torch::kFloat32);
-    auto embed_dtype = encoder_hidden_states.dtype();
-    torch::Tensor temb = time_embedder_->forward(timestep_proj.to(embed_dtype));
+    // bf16-direct temb for both modes (fp32 round-trip gives no benefit).
+    torch::Tensor temb = time_embedder_->forward(timestep_proj);
     torch::Tensor timestep_proj_out =
         time_proj_->forward(act_fn_->forward(temb));
     if (seq_len > 1) {
@@ -1451,7 +1463,6 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
     } else {
       timestep_proj = timestep_proj.view({batch_size, 6, -1});
     }
-
     if (encoder_hidden_states_image_embedded.defined()) {
       encoder_hidden_states_embedded =
           torch::cat({encoder_hidden_states_image_embedded,
@@ -1504,12 +1515,9 @@ class WanTransformer3DModelImpl : public torch::nn::Module {
     shift = shift.to(hidden_states.device());
     scale = scale.to(hidden_states.device());
 
-    auto norm_result = norm_out_->forward(hidden_states, /*keep_fp32*/ true);
-    auto one_plus_scale =
-        (1 + scale.to(hidden_states.dtype())).to(torch::kFloat32);
-    auto shift_fp32 = shift.to(torch::kFloat32);
-    auto norm_out = norm_result * one_plus_scale + shift_fp32;
-    hidden_states = norm_out.to(hidden_states.dtype());
+    // bf16 for both modes (fp32 round-trip gives no benefit).
+    auto norm_result = norm_out_->forward(hidden_states, /*keep_fp32*/ false);
+    hidden_states = norm_result * (1 + scale) + shift;
 
     if (::xllm::ParallelConfig::get_instance().sp_size() > 1 &&
         seq_len != pad_seq_len) {
