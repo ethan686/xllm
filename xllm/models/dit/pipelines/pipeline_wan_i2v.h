@@ -73,9 +73,9 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
     sparse_attn_config_.mask_refresh_steps =
         dit_config.dit_sparse_attention_mask_refresh_steps();
 
-    // is_distill from --dit_distill_enable flag: true selects FlowMatch scheduler
-    // + torch RMSNorm for norm_q/k; false uses UniPC + aclnn fused kernel.
-    // (The transformer reads the same flag directly from DiTConfig.)
+    // is_distill from --dit_distill_enable flag: true selects FlowMatch
+    // scheduler + torch RMSNorm for norm_q/k; false uses UniPC + aclnn
+    // fused kernel. (The transformer reads the same flag from DiTConfig.)
     is_distill_ = DiTConfig::get_instance().dit_distill_enable();
 
     LOG(INFO) << "Initializing Wan2_2I2V pipeline...";
@@ -467,9 +467,9 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
                         static_cast<float>(num_inference_steps);
       }
       flow_scheduler_->set_timesteps(num_inference_steps,
-                                options_.device(),
-                                /*sigmas*/ raw_sigmas,
-                                /*mu*/ std::nullopt);
+                                     options_.device(),
+                                     /*sigmas*/ raw_sigmas,
+                                     /*mu*/ std::nullopt);
       timesteps = flow_scheduler_->timesteps().to(options_.device());
     } else {
       // Original: UniPC computes its own sigma schedule.
@@ -616,9 +616,8 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
                                                   sparse_attn_state);
       }
       auto prev_latents =
-          is_distill_
-              ? flow_scheduler_->step(noise_pred, t, prepared_latents)
-              : unipc_scheduler_->step(noise_pred, t, prepared_latents);
+          is_distill_ ? flow_scheduler_->step(noise_pred, t, prepared_latents)
+                      : unipc_scheduler_->step(noise_pred, t, prepared_latents);
       prepared_latents = prev_latents.detach();
       noise_pred.reset();
       prev_latents = torch::Tensor();

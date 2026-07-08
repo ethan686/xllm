@@ -813,16 +813,19 @@ class WanAttentionImpl : public torch::nn::Module {
       query = dit::tp_rms_norm(query, norm_q_, parallel_args_.dit_tp_group_);
       key = dit::tp_rms_norm(key, norm_k_, parallel_args_.dit_tp_group_);
     } else {
-      // Distill uses per-op torch RMSNorm (matches lightx2v); else fused kernel.
+      // Distill uses per-op torch RMSNorm (matches lightx2v); else fused
+      // kernel.
       if (DiTConfig::get_instance().dit_distill_enable() && is_self_attention) {
         auto torch_rms = [](const torch::Tensor& x,
-                            const torch::Tensor& w, double eps) {
-          // x * rsqrt(mean(x^2, -1) + eps) * w; w.to(x) for rolling-load weights.
+                            const torch::Tensor& w,
+                            double eps) {
+          // x * rsqrt(mean(x^2, -1) + eps) * w; w.to(x) for rolling-load
+          // weights.
           auto var = x.pow(2).mean(-1, /*keepdim=*/true);
           return (x * torch::rsqrt(var + eps)) * w.to(x.device(), x.dtype());
         };
         query = torch_rms(query, norm_q_->weight(), norm_q_->eps());
-        key   = torch_rms(key,   norm_k_->weight(), norm_k_->eps());
+        key = torch_rms(key, norm_k_->weight(), norm_k_->eps());
       } else {
         query = std::get<0>(norm_q_->forward(query));
         key = std::get<0>(norm_k_->forward(key));
