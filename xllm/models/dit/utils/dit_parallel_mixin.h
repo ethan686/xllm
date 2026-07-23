@@ -19,7 +19,6 @@ limitations under the License.
 
 #include <utility>
 
-#include "core/framework/config/parallel_config.h"
 #include "core/framework/model_context.h"
 #include "core/framework/parallel_state/process_group.h"
 #include "framework/parallel_state/parallel_state.h"
@@ -35,20 +34,29 @@ namespace dit {
 class CFGParallelMixin {
  public:
   explicit CFGParallelMixin(const DiTModelContext& context)
-      : cfg_size_(ParallelConfig::get_instance().cfg_size()),
-        cfg_group_(context.get_parallel_args().dit_cfg_group_) {}
+      : cfg_group_(context.get_parallel_args().dit_cfg_group_) {}
 
   // forward_fn(is_positive) -> Tensor  —  caller captures embeddings in lambda.
   // Returns {positive_noise_pred, negative_noise_pred}.
   template <typename ForwardFn>
   std::pair<torch::Tensor, torch::Tensor> exec_with_cfg(
       const ForwardFn& forward_fn) const {
-    // Not doing CFG parallel: execute both conditionals serially.
-    if (cfg_group_ == nullptr || cfg_group_->world_size() != 2) {
+    int32_t cfg_size = 1;
+    if (cfg_group_ != nullptr) {
+      cfg_size = cfg_group_->world_size();
+    }
+
+    TORCH_CHECK(cfg_size == 1 || cfg_size == 2,
+                "CFGParallelMixin only supports cfg_size 1 or 2, got ",
+                cfg_size);
+
+    // Serial execution: evaluate positive and negative conditionals one by one.
+    if (cfg_size == 1) {
       return {forward_fn(true), forward_fn(false)};
     }
 
-    // CFG parallel: rank 0 → positive, rank 1 → negative, gather + chunk.
+    // CFG parallel (cfg_size == 2): rank 0 → positive, rank 1 → negative,
+    // gather + chunk.
     int32_t rank = cfg_group_->rank();
     torch::Tensor noise_pred = forward_fn(rank == 0);
     torch::Tensor gathered =
@@ -58,7 +66,6 @@ class CFGParallelMixin {
   }
 
  private:
-  int32_t cfg_size_ = 1;
   ProcessGroup* cfg_group_ = nullptr;
 };
 
