@@ -1169,6 +1169,7 @@ class QwenImageEditPlusPipelineImpl : public torch::nn::Module {
 
     unpacked_latents = unpacked_latents / latents_std + latents_mean;
     output_image = vae_->decode(unpacked_latents).sample.squeeze(2);
+    torch::save(output_image, "./vae_decode.pt");
     output_image = vae_image_processor_->postprocess(output_image);
     auto output_chunks = torch::chunk(output_image, batch_size, /*dim=*/0);
     DiTForwardOutput out;
