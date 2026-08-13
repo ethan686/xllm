@@ -39,12 +39,13 @@ limitations under the License.
 #include "core/framework/state_dict/state_dict.h"
 #include "core/framework/state_dict/utils.h"
 #include "core/layers/common/add_matmul.h"
+#include "core/layers/common/linear.h"
+#include "core/layers/common/rms_norm.h"
 #if defined(USE_DCU)
 #include "core/layers/dcu/flash_attention.h"
 #endif
 #include "framework/model_context.h"
 #include "framework/parallel_state/parallel_state.h"
-#include "models/dit/utils/dit_parallel_linear.h"
 #include "models/dit/utils/dit_parallel_mixin.h"
 #include "models/model_registry.h"
 
@@ -546,97 +547,99 @@ class AttentionImpl final : public torch::nn::Module {
     out_context_dim =
         out_context_dim.has_value() ? out_context_dim.value() : query_dim;
 
+    auto tp_group = context.get_parallel_args().dit_tp_group_;
+
     to_q_ = register_module("q_linear",
-                            xllm::dit::DiTParallelLinear(query_dim,
-                                                         q_dim,
-                                                         bias,
-                                                         options_,
-                                                         /*sp=*/std::nullopt,
-                                                         /*tp=*/std::nullopt,
-                                                         quant_args_));
+                            layer::ColumnParallelLinear(query_dim,
+                                                        q_dim,
+                                                        bias,
+                                                        /*gather_output=*/false,
+                                                        quant_args_,
+                                                        tp_group,
+                                                        options_));
 
     // Key-Value projections (if not only cross attention)
     if (!only_cross_attention) {
       to_k_ = register_module(
           "k_linear",
-          xllm::dit::DiTParallelLinear(cross_attention_dim.value(),
-                                       kv_dim,
-                                       bias,
-                                       options_,
-                                       /*sp=*/std::nullopt,
-                                       /*tp=*/std::nullopt,
-                                       quant_args_));
+          layer::ColumnParallelLinear(cross_attention_dim.value(),
+                                      kv_dim,
+                                      bias,
+                                      /*gather_output=*/false,
+                                      quant_args_,
+                                      tp_group,
+                                      options_));
 
       to_v_ = register_module(
           "v_linear",
-          xllm::dit::DiTParallelLinear(cross_attention_dim.value(),
-                                       kv_dim,
-                                       bias,
-                                       options_,
-                                       /*sp=*/std::nullopt,
-                                       /*tp=*/std::nullopt,
-                                       quant_args_));
+          layer::ColumnParallelLinear(cross_attention_dim.value(),
+                                      kv_dim,
+                                      bias,
+                                      /*gather_output=*/false,
+                                      quant_args_,
+                                      tp_group,
+                                      options_));
     }
 
     if (added_kv_proj_dim.has_value()) {
-      add_k_proj_ = register_module(
-          "add_k_linear",
-          xllm::dit::DiTParallelLinear(added_kv_proj_dim.value(),
-                                       kv_dim,
-                                       added_proj_bias,
-                                       options_,
-                                       /*sp=*/std::nullopt,
-                                       /*tp=*/std::nullopt,
-                                       quant_args_));
+      add_k_proj_ =
+          register_module("add_k_linear",
+                          layer::ColumnParallelLinear(added_kv_proj_dim.value(),
+                                                      kv_dim,
+                                                      added_proj_bias,
+                                                      /*gather_output=*/false,
+                                                      quant_args_,
+                                                      tp_group,
+                                                      options_));
 
-      add_v_proj_ = register_module(
-          "add_v_linear",
-          xllm::dit::DiTParallelLinear(added_kv_proj_dim.value(),
-                                       kv_dim,
-                                       added_proj_bias,
-                                       options_,
-                                       /*sp=*/std::nullopt,
-                                       /*tp=*/std::nullopt,
-                                       quant_args_));
+      add_v_proj_ =
+          register_module("add_v_linear",
+                          layer::ColumnParallelLinear(added_kv_proj_dim.value(),
+                                                      kv_dim,
+                                                      added_proj_bias,
+                                                      /*gather_output=*/false,
+                                                      quant_args_,
+                                                      tp_group,
+                                                      options_));
       if (context_pre_only.has_value()) {
         add_q_proj_ = register_module(
             "add_q_linear",
-            xllm::dit::DiTParallelLinear(added_kv_proj_dim.value(),
-                                         q_dim,
-                                         added_proj_bias,
-                                         options_,
-                                         /*sp=*/std::nullopt,
-                                         /*tp=*/std::nullopt,
-                                         quant_args_));
+            layer::ColumnParallelLinear(added_kv_proj_dim.value(),
+                                        q_dim,
+                                        added_proj_bias,
+                                        /*gather_output=*/false,
+                                        quant_args_,
+                                        tp_group,
+                                        options_));
       }
     }
 
     // Output projections
     if (!pre_only) {
-      to_out_ = register_module("to_out", torch::nn::Sequential());
-
-      to_out_->push_back(xllm::dit::DiTParallelLinear(q_dim,
-                                                      out_dim.value(),
-                                                      out_bias,
-                                                      options_,
-                                                      /*sp=*/std::nullopt,
-                                                      /*tp=*/std::nullopt,
-                                                      quant_args_));
-      to_out_->push_back(
-          torch::nn::Dropout(torch::nn::DropoutOptions(dropout)));
+      to_out_ = register_module(
+          "to_out",
+          layer::RowParallelLinear(q_dim,
+                                   out_dim.value(),
+                                   out_bias,
+                                   /*input_is_parallelized=*/true,
+                                   /*enable_result_reduction=*/true,
+                                   quant_args_,
+                                   tp_group,
+                                   options_));
     }
 
     // Additional output for context
     if (context_pre_only.has_value() && context_pre_only) {
-      to_add_out_ =
-          register_module("to_add_out_linear",
-                          xllm::dit::DiTParallelLinear(q_dim,
-                                                       out_context_dim.value(),
-                                                       out_bias,
-                                                       options_,
-                                                       /*sp=*/std::nullopt,
-                                                       /*tp=*/std::nullopt,
-                                                       quant_args_));
+      to_add_out_ = register_module(
+          "to_add_out_linear",
+          layer::RowParallelLinear(q_dim,
+                                   out_context_dim.value(),
+                                   out_bias,
+                                   /*input_is_parallelized=*/true,
+                                   /*enable_result_reduction=*/true,
+                                   quant_args_,
+                                   tp_group,
+                                   options_));
     }
 
     // Added QK normalization for added KV projections
@@ -656,8 +659,7 @@ class AttentionImpl final : public torch::nn::Module {
 
   void load_state_dict(const StateDict& state_dict) {
     // to_out
-    to_out_[0]->as<xllm::dit::DiTParallelLinear>()->load_state_dict(
-        state_dict.get_dict_with_prefix("to_out.0."));
+    to_out_->load_state_dict(state_dict.get_dict_with_prefix("to_out."));
     // to_add_out
     to_add_out_->load_state_dict(
         state_dict.get_dict_with_prefix("to_add_out."));
@@ -685,27 +687,25 @@ class AttentionImpl final : public torch::nn::Module {
   }
 
   void verify_loaded_weights(const std::string& prefix) {
-    // to_out
-    to_out_[0]->as<xllm::dit::DiTParallelLinear>()->verify_loaded_weights(
-        prefix + "to_out.0.");
-    // to_add_out
-    to_add_out_->verify_loaded_weights(prefix + "to_add_out.");
-    // norm_q
+    CHECK(to_out_->is_weight_loaded()) << prefix << "to_out weight not loaded";
+    CHECK(to_add_out_->is_weight_loaded())
+        << prefix << "to_add_out weight not loaded";
+
     norm_q_->verify_loaded_weights(prefix + "norm_q.");
-    // norm_k
     norm_k_->verify_loaded_weights(prefix + "norm_k.");
-    // norm_added_q
     norm_added_q_->verify_loaded_weights(prefix + "norm_added_q.");
-    // norm_added_k
     norm_added_k_->verify_loaded_weights(prefix + "norm_added_k.");
 
-    to_q_->verify_loaded_weights(prefix + "to_q.");
-    to_k_->verify_loaded_weights(prefix + "to_k.");
-    to_v_->verify_loaded_weights(prefix + "to_v.");
+    CHECK(to_q_->is_weight_loaded()) << prefix << "to_q weight not loaded";
+    CHECK(to_k_->is_weight_loaded()) << prefix << "to_k weight not loaded";
+    CHECK(to_v_->is_weight_loaded()) << prefix << "to_v weight not loaded";
 
-    add_q_proj_->verify_loaded_weights(prefix + "add_q_proj.");
-    add_k_proj_->verify_loaded_weights(prefix + "add_k_proj.");
-    add_v_proj_->verify_loaded_weights(prefix + "add_v_proj.");
+    CHECK(add_q_proj_->is_weight_loaded())
+        << prefix << "add_q_proj weight not loaded";
+    CHECK(add_k_proj_->is_weight_loaded())
+        << prefix << "add_k_proj weight not loaded";
+    CHECK(add_v_proj_->is_weight_loaded())
+        << prefix << "add_v_proj weight not loaded";
   }
 
  public:
@@ -720,11 +720,11 @@ class AttentionImpl final : public torch::nn::Module {
   QuantArgs quant_args_;
   torch::nn::LayerNorm layer_norm_q_{nullptr}, layer_norm_k_{nullptr},
       norm_cross_{nullptr};
-  xllm::dit::DiTParallelLinear to_q_{nullptr}, to_k_{nullptr}, to_v_{nullptr};
-  xllm::dit::DiTParallelLinear add_k_proj_{nullptr}, add_v_proj_{nullptr},
+  layer::ColumnParallelLinear to_q_{nullptr}, to_k_{nullptr}, to_v_{nullptr};
+  layer::ColumnParallelLinear add_k_proj_{nullptr}, add_v_proj_{nullptr},
       add_q_proj_{nullptr};
-  torch::nn::Sequential to_out_{nullptr};
-  xllm::dit::DiTParallelLinear to_add_out_{nullptr};
+  layer::RowParallelLinear to_out_{nullptr};
+  layer::RowParallelLinear to_add_out_{nullptr};
 
   // Assuming you have RMSNorm implemented
   RMSNorm norm_q_{nullptr}, norm_k_{nullptr}, norm_added_q_{nullptr},
