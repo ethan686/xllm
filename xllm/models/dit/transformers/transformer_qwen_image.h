@@ -659,7 +659,7 @@ class AttentionImpl final : public torch::nn::Module {
 
   void load_state_dict(const StateDict& state_dict) {
     // to_out
-    to_out_->load_state_dict(state_dict.get_dict_with_prefix("to_out."));
+    to_out_->load_state_dict(state_dict.get_dict_with_prefix("to_out.0."));
     // to_add_out
     to_add_out_->load_state_dict(
         state_dict.get_dict_with_prefix("to_add_out."));
@@ -1539,7 +1539,6 @@ class QwenDoubleStreamAttnProcessorImpl final
     kv_heads_ = attn_->kv_heads_;
     dim_head_ = attn_->dim_head_;
     q_hidden_size_ = q_heads_ * dim_head_;
-    kv_hidden_size_ = kv_heads_ * dim_head_;
   }
 
   std::tuple<torch::Tensor, torch::Tensor> forward(
@@ -1557,38 +1556,38 @@ class QwenDoubleStreamAttnProcessorImpl final
     auto txt_key = attn_->add_k_proj_->forward(encoder_hidden_states);
     auto txt_value = attn_->add_v_proj_->forward(encoder_hidden_states);
 
-    auto img_q_work = parallel_state::all_to_all_4D(
+    auto img_q_handler = parallel_state::all_to_all_4D(
         img_query.view({hidden_states.size(0), -1, q_heads_, dim_head_}),
         /*scatter_idx=*/2,
         /*gather_idx=*/1,
         /*async_ops=*/true,
         process_group_);
-    auto img_k_work = parallel_state::all_to_all_4D(
+    auto img_k_handler = parallel_state::all_to_all_4D(
         img_key.view({hidden_states.size(0), -1, kv_heads_, dim_head_}),
         /*scatter_idx=*/2,
         /*gather_idx=*/1,
         /*async_ops=*/true,
         process_group_);
-    auto img_v_work = parallel_state::all_to_all_4D(
+    auto img_v_handler = parallel_state::all_to_all_4D(
         img_value.view({hidden_states.size(0), -1, kv_heads_, dim_head_}),
         /*scatter_idx=*/2,
         /*gather_idx=*/1,
         /*async_ops=*/true,
         process_group_);
-    auto txt_q_work = parallel_state::all_to_all_4D(
+    auto txt_q_handler = parallel_state::all_to_all_4D(
         txt_query.view(
             {encoder_hidden_states.size(0), -1, q_heads_, dim_head_}),
         /*scatter_idx=*/2,
         /*gather_idx=*/1,
         /*async_ops=*/true,
         process_group_);
-    auto txt_k_work = parallel_state::all_to_all_4D(
+    auto txt_k_handler = parallel_state::all_to_all_4D(
         txt_key.view({encoder_hidden_states.size(0), -1, kv_heads_, dim_head_}),
         /*scatter_idx=*/2,
         /*gather_idx=*/1,
         /*async_ops=*/true,
         process_group_);
-    auto txt_v_work = parallel_state::all_to_all_4D(
+    auto txt_v_handler = parallel_state::all_to_all_4D(
         txt_value.view(
             {encoder_hidden_states.size(0), -1, kv_heads_, dim_head_}),
         /*scatter_idx=*/2,
@@ -1596,10 +1595,10 @@ class QwenDoubleStreamAttnProcessorImpl final
         /*async_ops=*/true,
         process_group_);
 
-    img_query = img_q_work();
-    img_key = img_k_work();
-    txt_query = txt_q_work();
-    txt_key = txt_k_work();
+    img_query = img_q_handler();
+    img_key = img_k_handler();
+    txt_query = txt_q_handler();
+    txt_key = txt_k_handler();
 
     if (attn_->norm_q_) {
       img_query = attn_->norm_q_->forward(img_query);
@@ -1617,8 +1616,8 @@ class QwenDoubleStreamAttnProcessorImpl final
     auto img_freqs = std::get<0>(image_rotary_emb);
     auto txt_freqs = std::get<1>(image_rotary_emb);
 
-    img_value = img_v_work();
-    txt_value = txt_v_work();
+    img_value = img_v_handler();
+    txt_value = txt_v_handler();
 
     if (sp_size > 1) {
       txt_query = unpad_tensor(txt_query, "encoder_hidden_states", 1);
@@ -1643,11 +1642,11 @@ class QwenDoubleStreamAttnProcessorImpl final
         joint_query,
         joint_key,
         joint_value,
-        q_heads_ / std::max(sp_size, 1),
+        q_heads_ / sp_size,
         /*input_layout=*/"BSND",
         /*pse=*/torch::nullopt,
         /*padding_mask=*/torch::nullopt,
-        /*atten_mask=*/torch::nullopt,
+        /*atten_mask*/ torch::nullopt,
         /*scale=*/pow(joint_query.size(3), -0.5),
         /*keep_prob=*/1.0,
         /*pre_tockens=*/65535,
@@ -1671,31 +1670,27 @@ class QwenDoubleStreamAttnProcessorImpl final
       img_attn_output = pad_tensor(img_attn_output, "hidden_states", 1);
     }
 
-    auto img_out_work = parallel_state::all_to_all_4D(
-        img_attn_output.view({hidden_states.size(0),
-                              -1,
-                              q_heads_ / std::max(sp_size, 1),
-                              dim_head_}),
+    auto img_out_handler = parallel_state::all_to_all_4D(
+        img_attn_output.view(
+            {hidden_states.size(0), -1, q_heads_ / sp_size, dim_head_}),
         /*scatter_idx=*/1,
         /*gather_idx=*/2,
         /*async_ops=*/true,
         process_group_);
-    auto txt_out_work = parallel_state::all_to_all_4D(
-        txt_attn_output.view({encoder_hidden_states.size(0),
-                              -1,
-                              q_heads_ / std::max(sp_size, 1),
-                              dim_head_}),
+    auto txt_out_handler = parallel_state::all_to_all_4D(
+        txt_attn_output.view(
+            {encoder_hidden_states.size(0), -1, q_heads_ / sp_size, dim_head_}),
         /*scatter_idx=*/1,
         /*gather_idx=*/2,
         /*async_ops=*/true,
         process_group_);
 
-    img_attn_output = img_out_work();
+    img_attn_output = img_out_handler();
     img_attn_output =
         img_attn_output.reshape({hidden_states.size(0), -1, q_hidden_size_});
     img_attn_output = attn_->to_out_->forward(img_attn_output);
 
-    txt_attn_output = txt_out_work();
+    txt_attn_output = txt_out_handler();
     txt_attn_output = txt_attn_output.reshape(
         {encoder_hidden_states.size(0), -1, q_hidden_size_});
     txt_attn_output = attn_->to_add_out_->forward(txt_attn_output);
@@ -1718,7 +1713,6 @@ class QwenDoubleStreamAttnProcessorImpl final
   int64_t kv_heads_ = 0;
   int64_t dim_head_ = 0;
   int64_t q_hidden_size_ = 0;
-  int64_t kv_hidden_size_ = 0;
 };
 TORCH_MODULE(QwenDoubleStreamAttnProcessor);
 
